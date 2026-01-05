@@ -9,6 +9,15 @@ extern "C" {
     void woomem_init(void);
     void woomem_shutdown(void);
 
+    typedef enum woomem_GCMarkedType
+    {
+        WOOMEM_GC_MARKED_UNMARKED = 0,
+        WOOMEM_GC_MARKED_SELF_MARKED = 1,
+        WOOMEM_GC_MARKED_FULL_MARKED = 2,
+        WOOMEM_GC_MARKED_DONOT_RELEASE = 3,
+
+    } woomem_GCMarkedType;
+
     typedef struct woomem_MemoryAttribute
     {
         uint8_t m_gc_age        : 4;
@@ -18,13 +27,13 @@ extern "C" {
     } woomem_MemoryAttribute;
 
     void* woomem_alloc(size_t size);
-    void woomem_free(void* ptr);
-    void* woomem_realloc(void* ptr, size_t new_size);
 
     /* OPTIONAL */ woomem_MemoryAttribute* woomem_varify_address(void* ptr);
 
-    typedef void (*woomem_WalkUnitFunc)(void*, size_t, woomem_MemoryAttribute*, void*);
-    void woomem_gc_walk_all_unit(woomem_WalkUnitFunc walk_callback, void* userdata);
+    typedef void (*woomem_DestroyFunc)(void*, void*);
+    void woomem_gc_destroy_and_free_all_unmarked(
+        woomem_DestroyFunc func, 
+        void* user_data);
 
 #ifdef __cplusplus
 }
