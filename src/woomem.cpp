@@ -32,6 +32,10 @@ namespace woomem_cppimpl
     // 分配基础对齐
     constexpr size_t MEMORY_UNIT_BASE_ALIGN = 8;
 
+    // 超长元素缓存临界，WooMem 将缓存超长元素的解分配，直到缓存的总容量超过此
+    // 限制。对于大小天然超过此限制的超长元素，WooMem 将在其解分配时直接释放。
+    constexpr size_t MEMORY_EXUINT_CACHE_SIZE = 8 * 1024 * 1024;
+
     /*
     WooMem 内存管理逻辑
 
@@ -40,6 +44,10 @@ namespace woomem_cppimpl
     包含若干个 内存单元(Memory Unit)，页面有自己的独有划分大小，一旦
     一个页面被划分为某个大小的内存单元后，该页面只能分配该大小的内存单
     元（除非此页面在某轮 GC 之后被完全释放）。
+
+    超长元素：如果分配的单元大于 65520（一个 Page 的最大单元空间），此
+    类元素被称为超长元素，超长元素的分配需要使用另一套实现——它们将不再
+    按照 Page 管理和分配，参见 MEMORY_EXUINT_CACHE_SIZE。
     */
 
     struct PageHeader
@@ -65,6 +73,11 @@ namespace woomem_cppimpl
 
     struct UnitHeader
     {
+        // 如果 UnitHeader 被用于描述一个超长单元（不属于 Page) 的单元，单元的前 16 位
+        // 需要保持为0，这能让其他需要遍历 Page 的操作认识到这不是一个 Page，而是一个
+        // 超长单元。
+        uint16_t _reserve_and_keep_zero_if_exlong_unit_;
+
         // 内存单元的属性信息
         woomem_MemoryAttribute m_memory_attribute;
 
@@ -75,10 +88,13 @@ namespace woomem_cppimpl
         // 如果为 0，表示没有下一个可用单元
         uint16_t m_next_free_unit_offset;
 
-        // 预留，仅用以确保单元的实际存储按 MEMORY_UNIT_BASE_ALIGN 对齐
-        char _reserved_[4];
+        // 预留，目前仅用以确保单元的实际存储按 MEMORY_UNIT_BASE_ALIGN 对齐
+        char _reserved_[2];
     };
     static_assert(sizeof(UnitHeader) == MEMORY_UNIT_BASE_ALIGN, "UnitHeader size too large");
+    static_assert(
+        offsetof(UnitHeader, _reserve_and_keep_zero_if_exlong_unit_) == offsetof(PageHeader, m_unit_size_in_this_page),
+        "UnitHeader and PageHeader layout mismatch");
 
     union Page
     {
@@ -268,10 +284,13 @@ namespace woomem_cppimpl
     */
     class GlobalPageCollection
     {
+        
     };
     GlobalPageCollection g_global_page_collection;
 
-
+    /*
+    ThreadLocalPageCollection 用于保管线程局域的空闲页面，按照分配单元大小进行分类管理。
+    */
     class ThreadLocalPageCollection
     {
     };

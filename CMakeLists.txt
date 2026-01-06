@@ -1,5 +1,7 @@
 cmake_minimum_required (VERSION 3.13)
 
+project ("woomem")
+
 add_library(woomem_options INTERFACE)
 target_compile_features(woomem_options INTERFACE cxx_std_17)
 target_compile_features(woomem_options INTERFACE c_std_11)
@@ -12,9 +14,8 @@ if (MSVC)
             "$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,"
             "$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
     endif()
-    target_compile_options(woomem_options INTERFACE "/utf-8")
+    target_compile_options(woomem_options INTERFACE "/source-charset:utf-8")
 endif()
 
-project ("woomem")
 add_subdirectory ("src")
 add_subdirectory ("test")
