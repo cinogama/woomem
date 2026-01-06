@@ -82,6 +82,11 @@ extern "C" {
     void* woomem_alloc(size_t size);
 
     /*
+    解分配给定的指针，该指针必须是合法的。
+    */
+    void woomem_free(void* ptr);
+
+    /*
     GC接口，外部的GC实现通过此接口改变 m_gc_marked 标记为 WOOMEM_GC_MARKED_SELF_MARKED；
     如果：1）指定的单元非法，2）已经被标记（无论被标记为何种状态）3）属于WOOMEM_GC_MARKED_DONOT_RELEASE
     4）正在执行 MINOR_GC且当前对象是老年代，则返回 WOOMEM_BOOL_FALSE，否则将该单元标记为 WOOMEM_GC_MARKED_SELF_MARKED

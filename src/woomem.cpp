@@ -46,7 +46,11 @@ namespace woomem_cppimpl
     {
         uint16_t m_unit_size_in_this_page;
         uint16_t m_total_unit_count_in_this_page;
-        
+
+        // Donot need atomic, allocate unit in page will happend in single thread.
+        // 指向 UnitHeader
+        uint16_t m_next_allocate_unit_offset;
+
         // Free operation might happend in multi-threaded environment.
         // `m_freed_unit_offset` 储存刚刚被释放的内存单元的偏移量，
         // 通过 Unit 的 `m_next_free_unit_offset` 字段，形成一个头插链表
@@ -54,32 +58,92 @@ namespace woomem_cppimpl
         // `m_freed_unit_offset`，从而实现内存单元的重复利用。
         atomic_uint16_t m_freed_unit_offset;
 
-        // Donot need atomic, allocate unit in page will happend in single thread.
-        uint16_t m_next_allocate_unit_offset;
     };
-    static_assert(sizeof(PageHeader) == 8, "PageHeader size too large");
+    static_assert(sizeof(PageHeader) == MEMORY_UNIT_BASE_ALIGN, "PageHeader size too large");
+
+    constexpr size_t MEMORY_PAGE_REAL_STORAGE_SIZE = MEMORY_PAGE_SIZE - sizeof(PageHeader);
 
     struct UnitHeader
     {
-        std::atomic_uint8_t m_allocated_flag;
+        // 内存单元的属性信息
         woomem_MemoryAttribute m_memory_attribute;
 
+        // 标记当前内存单元是否已经被分配，0 表示未分配，1 表示已分配
+        std::atomic_uint8_t m_allocated_flag;
+
+        // 用于构建空闲单元链表，用于指示下一个可用单元在块内的偏移量（指向 UnitHeader）
+        // 如果为 0，表示没有下一个可用单元
         uint16_t m_next_free_unit_offset;
 
-
+        // 预留，仅用以确保单元的实际存储按 MEMORY_UNIT_BASE_ALIGN 对齐
+        char _reserved_[4];
     };
-    
+    static_assert(sizeof(UnitHeader) == MEMORY_UNIT_BASE_ALIGN, "UnitHeader size too large");
 
     union Page
     {
-        char m_entire_page[MEMORY_PAGE_SIZE];
+        alignas(MEMORY_UNIT_BASE_ALIGN) char m_entire_page_storage[MEMORY_PAGE_SIZE];
         struct
         {
             PageHeader m_header;
-            char m_page_storage[MEMORY_PAGE_SIZE - sizeof(PageHeader)];
+            alignas(MEMORY_UNIT_BASE_ALIGN) char m_page_storage[MEMORY_PAGE_REAL_STORAGE_SIZE];
         };
+
+        // 仅当在当前页面完全空闲时，才能使用此接口初始化页面
+        void _init_by_size(uint16_t unit_size) noexcept
+        {
+            // unit_size must be multiple of MEMORY_UNIT_BASE_ALIGN
+            assert(unit_size % MEMORY_UNIT_BASE_ALIGN == 0);
+
+            const size_t unit_and_header_size = unit_size + sizeof(UnitHeader);
+
+            m_header.m_unit_size_in_this_page = unit_size;
+            m_header.m_total_unit_count_in_this_page =
+                static_cast<uint16_t>(MEMORY_PAGE_REAL_STORAGE_SIZE / unit_and_header_size);
+
+            uint16_t* make_free_chain_place = &m_header.m_next_allocate_unit_offset;
+            for (size_t offset = offsetof(Page, m_page_storage);
+                offset + unit_and_header_size < MEMORY_PAGE_SIZE;
+                offset += unit_and_header_size)
+            {
+                *make_free_chain_place = static_cast<uint16_t>(offset);
+
+                UnitHeader* unit_header =
+                    std::launder(reinterpret_cast<UnitHeader*>(m_entire_page_storage + offset));
+
+                // 初始化每个存储单元的分配状态，属性不需要初始化（后续流程可以确保绝不发生属性在初
+                // 始化之前发生的读取操作）。
+                unit_header->m_allocated_flag.store(0, std::memory_order_relaxed);
+
+                make_free_chain_place = &unit_header->m_next_free_unit_offset;
+            }
+
+            // 对于空闲链表的最后一个单元，其 m_next_allocate_unit_offset 应当为 0，表示没有后继的
+            // 空闲元素了
+            *make_free_chain_place = 0;
+
+            // 初始化释放链表为空
+            m_header.m_freed_unit_offset.store(0, std::memory_order_release);
+        }
+
+        Page(const Page&) = delete;
+        Page& operator=(const Page&) = delete;
+        Page(Page&&) = delete;
+        Page& operator=(Page&&) = delete;
+
+    protected:
+        Page(uint16_t unit_size)
+        {
+            _init_by_size(unit_size);
+        }
+        ~Page() = default;
+
+        friend class Chunk;
     };
     static_assert(sizeof(Page) == MEMORY_PAGE_SIZE, "Page size mismatch");
+    static_assert(offsetof(Page, m_header) == 0, "PageHeader offset mismatch");
+    static_assert(offsetof(Page, m_entire_page_storage) == 0, "Page storage offset mismatch");
+    static_assert(offsetof(Page, m_page_storage) == sizeof(PageHeader), "Page storage offset mismatch");
 
     class Chunk
     {
@@ -195,7 +259,20 @@ namespace woomem_cppimpl
                 chunk_storage,
                 MEMORY_CHUNK_SIZE);
         }
+    };
+
+    /*
+    GlobalPageCollection 用于保管所有的空闲页面，按照分配单元大小进行分类管理。
+    当需要分配某个大小的内存单元时，优先从 ThreadLocalPageCollection 中获取可用页面，
+    如果没有，再从 GlobalPageCollection 中获取。
+    */
+    class GlobalPageCollection
+    {
+    };
+    GlobalPageCollection g_global_page_collection;
 
 
+    class ThreadLocalPageCollection
+    {
     };
 }
