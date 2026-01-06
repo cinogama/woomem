@@ -80,6 +80,8 @@ extern "C" {
 
     } woomem_MemoryAttribute;
 
+    typedef void (*woomem_DestroyFunc)(void*, void*);
+
     /*
     分配指定大小的内存单元，并返回指向该内存单元的指针。
     */
@@ -88,17 +90,12 @@ extern "C" {
     /*
     GC接口，外部的GC实现通过此接口改变 m_gc_marked 标记为 WOOMEM_GC_MARKED_SELF_MARKED；
     如果：1）指定的单元非法，2）已经被标记（无论被标记为何种状态）3）属于WOOMEM_GC_MARKED_DONOT_RELEASE
-    4）是老年代单元，则返回 WOOMEM_BOOL_FALSE，否则将该单元标记为 WOOMEM_GC_MARKED_SELF_MARKED 并返回
-    WOOMEM_BOOL_TRUE。
+    4）正在执行 MINOR_GC且当前对象是老年代，则返回 WOOMEM_BOOL_FALSE，否则将该单元标记为 WOOMEM_GC_MARKED_SELF_MARKED
+    并返回 WOOMEM_BOOL_TRUE。
 
     NOTE: 如果考虑使用分代回收，外部 GC 实现应当在老年代对象直接引用新生代对象时，将此新生代对象特殊处理。
     */
-    woomem_Bool woomem_try_mark_self_young(void* ptr);
-
-    /*
-    GC接口，行为与 woomem_try_mark_self_young 类似，但是依然标记老年代单元为 WOOMEM_GC_MARKED_SELF_MARKED。
-    */
-    woomem_Bool woomem_try_mark_self_all(void* ptr);
+    woomem_Bool woomem_try_mark_self(void* ptr);
 
     /*
     GC接口，当外部的GC实现完成对某个单元的完整扫描后，调用此接口将该单元的 m_gc_marked 标记为
@@ -108,13 +105,17 @@ extern "C" {
     */
     void woomem_full_mark(void* ptr);
 
-    woomem_Bool woomem_varify_address(void* ptr);
+    /*
+    GC接口，宣告一轮新的标记-回收开始。
+    更新内部计数器，并将当前轮次标记为活动状态。
+    */
+    void woomem_begin_gc_mark(woomem_Bool is_full_gc);
 
-    void woomem_begin_gc_mark(void);
-
-    typedef void (*woomem_DestroyFunc)(void*, void*);
+    /*
+    GC接口，宣告一轮新的标记-回收结束。
+    释放所有未标记的内存单元（除非对象是老年代，且正在执行 MINOR_GC）。
+    */
     void woomem_end_gc_mark_and_free_all_unmarked(
-        woomem_Bool         keep_old_unit,
         woomem_DestroyFunc  destroy_func,
         void*               userdata);
 
