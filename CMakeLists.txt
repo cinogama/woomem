@@ -12,7 +12,7 @@ if (MSVC)
             "$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,"
             "$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
     endif()
-    target_compile_options(woomem_options INTERFACE "/source-charset:utf-8")
+    target_compile_options(woomem_options INTERFACE "/utf-8")
 endif()
 
 project ("woomem")

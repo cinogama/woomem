@@ -11,13 +11,6 @@ extern "C" {
 
     /*
     woomem_GCMarkedType
-
-    用于标记内存单元的 GC 标记状态，以便垃圾回收器能够识别和处理不同状态的内存单元。
-    WOOMEM_GC_MARKED_UNMARKED：
-    WOOMEM_GC_MARKED_SELF_MARKED：表示该内存单元已被标记为活动，但其引用的其他内存单元未被标记。
-    WOOMEM_GC_MARKED_FULL_MARKED：表示该内存单元及其引用的所有内存单元均已被标记为活动。
-    WOOMEM_GC_MARKED_DONOT_RELEASE：表示该内存单元不应被垃圾回收器释放，通常用于特殊用途的内存单元。
-                                    此状态会在特殊情况下回落到 WOOMEM_GC_MARKED_FULL_MARKED
     */
     typedef enum woomem_GCMarkedType
     {
@@ -42,6 +35,7 @@ extern "C" {
 
         /*
         该内存单元不应被垃圾回收器释放，其引用的其他单元也不需要标记和释放，通常用于特殊用途的内存单元。
+        外部GC实现可能在特定情况下将其回落标记为 WOOMEM_GC_MARKED_FULL_MARKED。
         */
         WOOMEM_GC_MARKED_DONOT_RELEASE = 3,
 
