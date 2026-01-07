@@ -14,6 +14,24 @@
 
 using namespace std;
 
+// 跨平台编译器提示宏
+#if defined(__GNUC__) || defined(__clang__)
+    #define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
+    #define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
+    #define WOOMEM_ALWAYS_INLINE   __attribute__((always_inline)) inline
+    #define WOOMEM_NOINLINE        __attribute__((noinline))
+#elif defined(_MSC_VER)
+    #define WOOMEM_LIKELY(x)       (x)
+    #define WOOMEM_UNLIKELY(x)     (x)
+    #define WOOMEM_ALWAYS_INLINE   __forceinline
+    #define WOOMEM_NOINLINE        __declspec(noinline)
+#else
+    #define WOOMEM_LIKELY(x)       (x)
+    #define WOOMEM_UNLIKELY(x)     (x)
+    #define WOOMEM_ALWAYS_INLINE   inline
+    #define WOOMEM_NOINLINE
+#endif
+
 namespace woomem_cppimpl
 {
     // ============================================================================
@@ -31,10 +49,18 @@ namespace woomem_cppimpl
     constexpr size_t MAX_MEDIUM_SIZE = 32 * 1024; // 中对象上限
     
     // 每个 Chunk 的大小（用于批量从OS获取内存）
-    constexpr size_t CHUNK_SIZE = 256 * 1024;    // 256KB
+    // 使用 4MB 大块减少系统调用频率
+    constexpr size_t CHUNK_SIZE = 4 * 1024 * 1024;    // 4MB
     
-    // ThreadCache 每个 size class 的最大缓存数量
-    constexpr size_t THREAD_CACHE_MAX_SIZE = 64;
+    // ThreadCache 每个 size class 的最大缓存数量 - 增大以减少与中央缓存的交互
+    constexpr size_t THREAD_CACHE_MAX_SIZE = 512;
+    
+    // 批量从中央缓存获取的数量
+    constexpr size_t BATCH_FETCH_SIZE = 128;
+    
+    // 全局 GC timing，使用原子变量避免锁
+    static atomic<uint8_t> g_current_gc_timing{0};
+    static atomic<bool> g_is_full_gc{false};
     
     // Small size classes
     constexpr size_t SMALL_SIZE_CLASSES[] = {
@@ -59,26 +85,48 @@ namespace woomem_cppimpl
         return (size + alignment - 1) & ~(alignment - 1);
     }
     
-    // 根据请求大小找到对应的 size class index
-    inline size_t get_size_class_index(size_t size) {
-        // 小对象
-        for (size_t i = 0; i < NUM_SMALL_CLASSES; ++i) {
-            if (size <= SMALL_SIZE_CLASSES[i]) {
-                return i;
-            }
+    // 预计算的大小类查找表 - 避免 if-else 链
+    // 对于 0-1024 字节，直接查表；超过1024使用计算
+    // 每8字节一个槽位，共 129 个槽位 (0, 8, 16, ..., 1024)
+    static const uint8_t SIZE_CLASS_LOOKUP[129] = {
+        0,  // 0
+        0,  // 8
+        1,  // 16
+        2,  // 24
+        3,  // 32
+        4, 4, // 40, 48
+        5, 5, // 56, 64
+        6, 6, // 72, 80
+        7, 7, // 88, 96
+        8, 8, // 104, 112
+        9, 9, // 120, 128
+        10, 10, 10, 10, 10, 10, 10, 10, // 136-192
+        11, 11, 11, 11, 11, 11, 11, 11, // 200-256
+        12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, // 264-384
+        13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, // 392-512
+        14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 
+        14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, // 520-768
+        15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 
+        15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, // 776-1024
+    };
+    
+    // 快速查找 size class - 使用查找表
+    WOOMEM_ALWAYS_INLINE size_t get_size_class_index(size_t size) {
+        if (WOOMEM_LIKELY(size <= 1024)) {
+            // 直接查表，(size + 7) / 8 得到槽位索引
+            return SIZE_CLASS_LOOKUP[(size + 7) >> 3];
         }
-        // 中对象
-        for (size_t i = 0; i < NUM_MEDIUM_CLASSES; ++i) {
-            if (size <= MEDIUM_SIZE_CLASSES[i]) {
-                return NUM_SMALL_CLASSES + i;
-            }
-        }
-        // 大对象，返回无效索引
-        return TOTAL_SIZE_CLASSES;
+        // 中等对象，使用位操作快速计算
+        if (size <= 2048) return 16;
+        if (size <= 4096) return 17;
+        if (size <= 8192) return 18;
+        if (size <= 16384) return 19;
+        if (size <= 32768) return 20;
+        return TOTAL_SIZE_CLASSES; // 大对象
     }
     
     // 根据 size class index 获取实际分配大小
-    inline size_t get_size_from_class(size_t class_index) {
+    WOOMEM_ALWAYS_INLINE size_t get_size_from_class(size_t class_index) {
         if (class_index < NUM_SMALL_CLASSES) {
             return SMALL_SIZE_CLASSES[class_index];
         } else if (class_index < TOTAL_SIZE_CLASSES) {
@@ -218,8 +266,8 @@ namespace woomem_cppimpl
             }
             m_chunks = nullptr;
             m_large_blocks = nullptr;
-            m_current_gc_timing = 0;
-            m_is_full_gc = false;
+            g_current_gc_timing.store(0, memory_order_relaxed);
+            g_is_full_gc.store(false, memory_order_relaxed);
         }
         
         void shutdown() {
@@ -256,8 +304,8 @@ namespace woomem_cppimpl
                 return head;
             }
             
-            // 取出最多 THREAD_CACHE_MAX_SIZE / 2 个块
-            size_t max_fetch = THREAD_CACHE_MAX_SIZE / 2;
+            // 取出最多 BATCH_FETCH_SIZE 个块
+            size_t max_fetch = BATCH_FETCH_SIZE;
             size_t count = 0;
             FreeNode* tail = head;
             FreeNode* prev = nullptr;
@@ -317,7 +365,7 @@ namespace woomem_cppimpl
             header->m_flags = BlockHeader::FLAG_ALLOCATED | BlockHeader::FLAG_LARGE_BLOCK;
             header->m_gc_attr.m_gc_age = 15;
             header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_UNMARKED;
-            header->m_gc_attr.m_alloc_timing = m_current_gc_timing;
+            header->m_gc_attr.m_alloc_timing = g_current_gc_timing.load(memory_order_relaxed);
             
             // 链入大对象列表
             {
@@ -353,14 +401,19 @@ namespace woomem_cppimpl
             woomem_os_release_memory(lb, total_size);
         }
         
-        // GC 相关
-        uint8_t get_current_gc_timing() const { return m_current_gc_timing; }
-        bool is_full_gc() const { return m_is_full_gc; }
+        // GC 相关 - 使用全局原子变量，避免每次分配都访问锁
+        static uint8_t get_current_gc_timing() { 
+            return g_current_gc_timing.load(memory_order_relaxed); 
+        }
+        static bool is_full_gc() { 
+            return g_is_full_gc.load(memory_order_relaxed); 
+        }
         
         void begin_gc_mark(bool is_full_gc) {
             lock_guard<mutex> lock(m_mutex);
-            m_current_gc_timing = (m_current_gc_timing + 1) & 0x03;
-            m_is_full_gc = is_full_gc;
+            uint8_t new_timing = (g_current_gc_timing.load(memory_order_relaxed) + 1) & 0x03;
+            g_current_gc_timing.store(new_timing, memory_order_release);
+            g_is_full_gc.store(is_full_gc, memory_order_release);
         }
         
         // 验证指针是否为有效分配的内存
@@ -403,8 +456,8 @@ namespace woomem_cppimpl
         void gc_sweep(woomem_DestroyFunc destroy_func, void* userdata) {
             lock_guard<mutex> lock(m_mutex);
             
-            uint8_t current_timing = m_current_gc_timing;
-            bool is_full = m_is_full_gc;
+            uint8_t current_timing = g_current_gc_timing.load(memory_order_acquire);
+            bool is_full = g_is_full_gc.load(memory_order_acquire);
             
             // 遍历所有 chunks 中的块
             for (Chunk* chunk = m_chunks; chunk; chunk = chunk->m_next) {
@@ -483,13 +536,12 @@ namespace woomem_cppimpl
         size_t m_free_counts[TOTAL_SIZE_CLASSES];
         Chunk* m_chunks;
         LargeBlock* m_large_blocks;
-        uint8_t m_current_gc_timing;
-        bool m_is_full_gc;
         
         // 从 chunk 分配新块
         FreeNode* allocate_new_blocks(size_t class_index, size_t& out_count) {
             size_t block_size = HEADER_SIZE + get_size_from_class(class_index);
-            size_t num_blocks = min(THREAD_CACHE_MAX_SIZE / 2, CHUNK_SIZE / block_size);
+            // 一次分配更多块，减少锁竞争
+            size_t num_blocks = min(BATCH_FETCH_SIZE * 2, CHUNK_SIZE / block_size);
             
             // 确保当前 chunk 有足够空间，或者分配新 chunk
             Chunk* chunk = m_chunks;
@@ -500,6 +552,9 @@ namespace woomem_cppimpl
                     return nullptr;
                 }
             }
+            
+            // 获取当前 gc timing（只读取一次）
+            uint8_t current_timing = g_current_gc_timing.load(memory_order_relaxed);
             
             // 分配块
             FreeNode* head = nullptr;
@@ -516,7 +571,7 @@ namespace woomem_cppimpl
                 header->m_flags = 0;
                 header->m_gc_attr.m_gc_age = 15;
                 header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_UNMARKED;
-                header->m_gc_attr.m_alloc_timing = m_current_gc_timing;
+                header->m_gc_attr.m_alloc_timing = current_timing;
                 
                 FreeNode* node = reinterpret_cast<FreeNode*>(get_user_ptr(header));
                 node->m_next = nullptr;
@@ -622,34 +677,39 @@ namespace woomem_cppimpl
             }
         }
         
-        void* alloc(size_t size) {
+        // 快速路径分配 - 内联优化
+        WOOMEM_ALWAYS_INLINE void* alloc(size_t size) {
             size_t class_index = get_size_class_index(size);
             
-            // 大对象直接从中央缓存分配
-            if (class_index >= TOTAL_SIZE_CLASSES) {
+            // 大对象直接从中央缓存分配（罕见路径）
+            if (WOOMEM_UNLIKELY(class_index >= TOTAL_SIZE_CLASSES)) {
                 return m_central->alloc_large(size);
             }
             
-            // 尝试从线程本地缓存分配
+            // 尝试从线程本地缓存分配 - 快速路径，无锁
             FreeNode* node = m_free_lists[class_index];
-            if (node) {
+            if (WOOMEM_LIKELY(node != nullptr)) {
                 m_free_lists[class_index] = node->m_next;
                 m_free_counts[class_index]--;
                 
-                // 初始化头部
+                // 最小化头部初始化 - 只设置必要字段
                 BlockHeader* header = get_header(node);
-                header->set_allocated(true);
+                header->m_flags = BlockHeader::FLAG_ALLOCATED;
                 header->m_user_size = static_cast<uint32_t>(size);
-                header->m_gc_attr.m_gc_age = 15;
-                header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_UNMARKED;
-                header->m_gc_attr.m_alloc_timing = m_central->get_current_gc_timing();
+                // GC 属性在预分配时已初始化，这里只更新 alloc_timing
+                header->m_gc_attr.m_alloc_timing = g_current_gc_timing.load(memory_order_relaxed);
                 
                 return node;
             }
             
-            // 从中央缓存获取一批
+            // 从中央缓存获取一批 - 慢速路径
+            return alloc_slow_path(size, class_index);
+        }
+        
+        // 慢速路径，不内联
+        WOOMEM_NOINLINE void* alloc_slow_path(size_t size, size_t class_index) {
             size_t count = 0;
-            node = m_central->fetch_batch(class_index, count);
+            FreeNode* node = m_central->fetch_batch(class_index, count);
             if (!node) {
                 return nullptr;
             }
@@ -660,36 +720,41 @@ namespace woomem_cppimpl
             
             // 初始化头部
             BlockHeader* header = get_header(node);
-            header->set_allocated(true);
+            header->m_flags = BlockHeader::FLAG_ALLOCATED;
             header->m_user_size = static_cast<uint32_t>(size);
+            uint8_t gc_timing = g_current_gc_timing.load(memory_order_relaxed);
             header->m_gc_attr.m_gc_age = 15;
             header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_UNMARKED;
-            header->m_gc_attr.m_alloc_timing = m_central->get_current_gc_timing();
+            header->m_gc_attr.m_alloc_timing = gc_timing;
             
             return node;
         }
         
-        void free(void* ptr) {
+        // 快速路径释放 - 内联优化
+        WOOMEM_ALWAYS_INLINE void free(void* ptr) {
             BlockHeader* header = get_header(ptr);
             
-            // 大对象直接归还中央缓存
-            if (header->is_large_block()) {
+            // 大对象直接归还中央缓存（罕见路径）
+            if (WOOMEM_UNLIKELY(header->is_large_block())) {
                 LargeBlock* lb = LargeBlock::from_user_ptr(ptr);
                 m_central->free_large(lb);
                 return;
             }
             
             size_t class_index = header->m_size_class;
-            header->set_allocated(false);
+            // 在释放时重置 GC 属性，这样下次分配时只需更新 alloc_timing
+            header->m_flags = 0;
+            header->m_gc_attr.m_gc_age = 15;
+            header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_UNMARKED;
             
             // 放入线程本地缓存
             FreeNode* node = reinterpret_cast<FreeNode*>(ptr);
             node->m_next = m_free_lists[class_index];
             m_free_lists[class_index] = node;
-            m_free_counts[class_index]++;
+            size_t new_count = ++m_free_counts[class_index];
             
-            // 如果缓存过多，归还一部分到中央缓存
-            if (m_free_counts[class_index] > THREAD_CACHE_MAX_SIZE) {
+            // 如果缓存过多，归还一部分到中央缓存（罕见路径）
+            if (WOOMEM_UNLIKELY(new_count > THREAD_CACHE_MAX_SIZE)) {
                 return_to_central(class_index);
             }
         }

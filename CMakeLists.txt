@@ -15,6 +15,10 @@ if (MSVC)
             "$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
     endif()
     target_compile_options(woomem_options INTERFACE "/source-charset:utf-8")
+else()
+    # Linux/Unix: link pthread
+    find_package(Threads REQUIRED)
+    target_link_libraries(woomem_options INTERFACE Threads::Threads)
 endif()
 
 add_subdirectory ("src")
