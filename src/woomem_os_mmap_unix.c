@@ -4,6 +4,7 @@
 
 #   include <sys/mman.h>
 #   include <unistd.h>
+#   include <errno.h>
 
 size_t woomem_os_page_size(void)
 {
@@ -13,7 +14,7 @@ size_t woomem_os_page_size(void)
 {
 #   ifdef __EMSCRIPTEN__
     void* result = mmap(
-        nullptr,
+        NULL,
         size,
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE | MAP_ANON,
@@ -21,14 +22,14 @@ size_t woomem_os_page_size(void)
         0);
 #   else
     void* result = mmap(
-        nullptr,
+        NULL,
         size,
         PROT_NONE,
         MAP_PRIVATE | MAP_ANONYMOUS,
         -1,
         0);
 #   endif
-    return result == MAP_FAILED ? nullptr : result;
+    return result == MAP_FAILED ? NULL : result;
 }
 int /* 0 means OK */ woomem_os_commit_memory(void* addr, size_t size)
 {
