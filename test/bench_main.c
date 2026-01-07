@@ -58,8 +58,8 @@ double timer_elapsed_ms(Timer* t) {
 #else
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &end);
-    return (end.tv_sec - t->start.tv_sec) * 1000.0 + 
-           (end.tv_nsec - t->start.tv_nsec) / 1000000.0;
+    return (end.tv_sec - t->start.tv_sec) * 1000.0 +
+        (end.tv_nsec - t->start.tv_nsec) / 1000000.0;
 #endif
 }
 
@@ -82,14 +82,14 @@ void bench_sequential_alloc_free(void)
 {
     printf("\n=== Sequential Alloc/Free Benchmark ===\n");
     printf("Iterations: %d\n\n", ITERATIONS);
-    
+
     Timer t;
     double woomem_time, malloc_time;
-    
+
     // 测试小对象 (64 bytes)
     {
         printf("Small objects (%d bytes):\n", SMALL_SIZE);
-        
+
         // woomem
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
@@ -98,7 +98,7 @@ void bench_sequential_alloc_free(void)
             woomem_free(p);
         }
         woomem_time = timer_elapsed_ms(&t);
-        
+
         // malloc
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
@@ -107,16 +107,16 @@ void bench_sequential_alloc_free(void)
             free(p);
         }
         malloc_time = timer_elapsed_ms(&t);
-        
+
         printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
         printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
         printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
     }
-    
+
     // 测试中等对象 (1024 bytes)
     {
         printf("Medium objects (%d bytes):\n", MEDIUM_SIZE);
-        
+
         // woomem
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
@@ -125,7 +125,7 @@ void bench_sequential_alloc_free(void)
             woomem_free(p);
         }
         woomem_time = timer_elapsed_ms(&t);
-        
+
         // malloc
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
@@ -134,17 +134,17 @@ void bench_sequential_alloc_free(void)
             free(p);
         }
         malloc_time = timer_elapsed_ms(&t);
-        
+
         printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
         printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
         printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
     }
-    
+
     // 测试大对象 (16384 bytes)
     {
         int large_iterations = ITERATIONS / 10;  // 大对象测试减少迭代次数
         printf("Large objects (%d bytes, %d iterations):\n", LARGE_SIZE, large_iterations);
-        
+
         // woomem
         timer_start(&t);
         for (int i = 0; i < large_iterations; ++i) {
@@ -153,7 +153,7 @@ void bench_sequential_alloc_free(void)
             woomem_free(p);
         }
         woomem_time = timer_elapsed_ms(&t);
-        
+
         // malloc
         timer_start(&t);
         for (int i = 0; i < large_iterations; ++i) {
@@ -162,7 +162,7 @@ void bench_sequential_alloc_free(void)
             free(p);
         }
         malloc_time = timer_elapsed_ms(&t);
-        
+
         printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, large_iterations / woomem_time / 1000.0);
         printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, large_iterations / malloc_time / 1000.0);
         printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
@@ -177,17 +177,17 @@ void bench_batch_alloc_free(void)
 {
     printf("\n=== Batch Alloc then Free Benchmark ===\n");
     printf("Batch size: %d, Iterations: %d\n\n", BATCH_SIZE, ITERATIONS / BATCH_SIZE);
-    
+
     Timer t;
     double woomem_time, malloc_time;
     void** ptrs = (void**)malloc(BATCH_SIZE * sizeof(void*));
-    
+
     int batches = ITERATIONS / BATCH_SIZE;
-    
+
     // 小对象
     {
         printf("Small objects (%d bytes):\n", SMALL_SIZE);
-        
+
         // woomem
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
@@ -199,7 +199,7 @@ void bench_batch_alloc_free(void)
             }
         }
         woomem_time = timer_elapsed_ms(&t);
-        
+
         // malloc
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
@@ -211,16 +211,16 @@ void bench_batch_alloc_free(void)
             }
         }
         malloc_time = timer_elapsed_ms(&t);
-        
+
         printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
         printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
         printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
     }
-    
+
     // 中等对象
     {
         printf("Medium objects (%d bytes):\n", MEDIUM_SIZE);
-        
+
         // woomem
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
@@ -232,7 +232,7 @@ void bench_batch_alloc_free(void)
             }
         }
         woomem_time = timer_elapsed_ms(&t);
-        
+
         // malloc
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
@@ -244,12 +244,12 @@ void bench_batch_alloc_free(void)
             }
         }
         malloc_time = timer_elapsed_ms(&t);
-        
+
         printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
         printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
         printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
     }
-    
+
     free(ptrs);
 }
 
@@ -261,10 +261,10 @@ void bench_random_sizes(void)
 {
     printf("\n=== Random Size Allocation Benchmark ===\n");
     printf("Iterations: %d\n\n", ITERATIONS);
-    
+
     Timer t;
     double woomem_time, malloc_time;
-    
+
     // 预生成随机大小
     size_t* sizes = (size_t*)malloc(ITERATIONS * sizeof(size_t));
     srand(12345);  // 固定种子确保可重复
@@ -272,7 +272,7 @@ void bench_random_sizes(void)
         // 随机大小：8 - 4096 字节
         sizes[i] = 8 + (rand() % 4089);
     }
-    
+
     // woomem
     timer_start(&t);
     for (int i = 0; i < ITERATIONS; ++i) {
@@ -281,7 +281,7 @@ void bench_random_sizes(void)
         woomem_free(p);
     }
     woomem_time = timer_elapsed_ms(&t);
-    
+
     // malloc
     timer_start(&t);
     for (int i = 0; i < ITERATIONS; ++i) {
@@ -290,12 +290,12 @@ void bench_random_sizes(void)
         free(p);
     }
     malloc_time = timer_elapsed_ms(&t);
-    
+
     printf("Random sizes (8-4096 bytes):\n");
     printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
     printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
     printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
-    
+
     free(sizes);
 }
 
@@ -307,13 +307,13 @@ void bench_mixed_pattern(void)
 {
     printf("\n=== Mixed Pattern Benchmark (Simulating Real Workload) ===\n");
     printf("Pool size: %d, Operations: %d\n\n", BATCH_SIZE, ITERATIONS);
-    
+
     Timer t;
     double woomem_time, malloc_time;
-    
+
     void** pool = (void**)malloc(BATCH_SIZE * sizeof(void*));
     int pool_count = 0;
-    
+
     // 预生成随机操作序列
     int* ops = (int*)malloc(ITERATIONS * sizeof(int));  // 0=alloc, 1=free
     size_t* sizes = (size_t*)malloc(ITERATIONS * sizeof(size_t));
@@ -322,7 +322,7 @@ void bench_mixed_pattern(void)
         ops[i] = rand() % 2;
         sizes[i] = 16 + (rand() % 1009);  // 16-1024 bytes
     }
-    
+
     // woomem
     pool_count = 0;
     timer_start(&t);
@@ -332,7 +332,8 @@ void bench_mixed_pattern(void)
             if (pool_count < BATCH_SIZE) {
                 pool[pool_count++] = woomem_alloc(sizes[i]);
             }
-        } else {
+        }
+        else {
             // Free random item
             int idx = rand() % pool_count;
             woomem_free(pool[idx]);
@@ -344,7 +345,7 @@ void bench_mixed_pattern(void)
         woomem_free(pool[i]);
     }
     woomem_time = timer_elapsed_ms(&t);
-    
+
     // malloc
     pool_count = 0;
     srand(54321);  // 重置随机数以获得相同序列
@@ -355,7 +356,8 @@ void bench_mixed_pattern(void)
             if (pool_count < BATCH_SIZE) {
                 pool[pool_count++] = malloc(sizes[i]);
             }
-        } else {
+        }
+        else {
             // Free random item
             int idx = rand() % pool_count;
             free(pool[idx]);
@@ -367,12 +369,12 @@ void bench_mixed_pattern(void)
         free(pool[i]);
     }
     malloc_time = timer_elapsed_ms(&t);
-    
+
     printf("Mixed alloc/free pattern:\n");
     printf("  woomem: %.2f ms (%.2f M ops/sec)\n", woomem_time, ITERATIONS / woomem_time / 1000.0);
     printf("  malloc:  %.2f ms (%.2f M ops/sec)\n", malloc_time, ITERATIONS / malloc_time / 1000.0);
     printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
-    
+
     free(pool);
     free(ops);
     free(sizes);
@@ -394,7 +396,7 @@ typedef struct {
 DWORD WINAPI thread_bench_woomem(LPVOID arg) {
     ThreadData* data = (ThreadData*)arg;
     Timer t;
-    
+
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
         void* p = woomem_alloc(SMALL_SIZE);
@@ -402,14 +404,14 @@ DWORD WINAPI thread_bench_woomem(LPVOID arg) {
         woomem_free(p);
     }
     data->woomem_time = timer_elapsed_ms(&t);
-    
+
     return 0;
 }
 
 DWORD WINAPI thread_bench_malloc(LPVOID arg) {
     ThreadData* data = (ThreadData*)arg;
     Timer t;
-    
+
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
         void* p = malloc(SMALL_SIZE);
@@ -417,7 +419,7 @@ DWORD WINAPI thread_bench_malloc(LPVOID arg) {
         free(p);
     }
     data->malloc_time = timer_elapsed_ms(&t);
-    
+
     return 0;
 }
 
@@ -425,14 +427,14 @@ void bench_multithread(int num_threads)
 {
     printf("\n=== Multi-thread Benchmark (%d threads) ===\n", num_threads);
     printf("Iterations per thread: %d\n\n", ITERATIONS / num_threads);
-    
+
     HANDLE* threads = (HANDLE*)malloc(num_threads * sizeof(HANDLE));
     ThreadData* data = (ThreadData*)malloc(num_threads * sizeof(ThreadData));
-    
+
     int iter_per_thread = ITERATIONS / num_threads;
     Timer t;
     double total_woomem, total_malloc;
-    
+
     // woomem test
     timer_start(&t);
     for (int i = 0; i < num_threads; ++i) {
@@ -442,11 +444,11 @@ void bench_multithread(int num_threads)
     }
     WaitForMultipleObjects(num_threads, threads, TRUE, INFINITE);
     total_woomem = timer_elapsed_ms(&t);
-    
+
     for (int i = 0; i < num_threads; ++i) {
         CloseHandle(threads[i]);
     }
-    
+
     // malloc test
     timer_start(&t);
     for (int i = 0; i < num_threads; ++i) {
@@ -456,16 +458,16 @@ void bench_multithread(int num_threads)
     }
     WaitForMultipleObjects(num_threads, threads, TRUE, INFINITE);
     total_malloc = timer_elapsed_ms(&t);
-    
+
     for (int i = 0; i < num_threads; ++i) {
         CloseHandle(threads[i]);
     }
-    
+
     printf("Small objects (%d bytes):\n", SMALL_SIZE);
     printf("  woomem: %.2f ms (%.2f M ops/sec total)\n", total_woomem, ITERATIONS / total_woomem / 1000.0);
     printf("  malloc:  %.2f ms (%.2f M ops/sec total)\n", total_malloc, ITERATIONS / total_malloc / 1000.0);
     printf("  Speedup: %.2fx\n\n", total_malloc / total_woomem);
-    
+
     free(threads);
     free(data);
 }
@@ -484,7 +486,7 @@ typedef struct {
 void* thread_bench_woomem_posix(void* arg) {
     ThreadData* data = (ThreadData*)arg;
     Timer t;
-    
+
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
         void* p = woomem_alloc(SMALL_SIZE);
@@ -492,14 +494,14 @@ void* thread_bench_woomem_posix(void* arg) {
         woomem_free(p);
     }
     data->woomem_time = timer_elapsed_ms(&t);
-    
+
     return NULL;
 }
 
 void* thread_bench_malloc_posix(void* arg) {
     ThreadData* data = (ThreadData*)arg;
     Timer t;
-    
+
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
         void* p = malloc(SMALL_SIZE);
@@ -507,7 +509,7 @@ void* thread_bench_malloc_posix(void* arg) {
         free(p);
     }
     data->malloc_time = timer_elapsed_ms(&t);
-    
+
     return NULL;
 }
 
@@ -515,14 +517,14 @@ void bench_multithread(int num_threads)
 {
     printf("\n=== Multi-thread Benchmark (%d threads) ===\n", num_threads);
     printf("Iterations per thread: %d\n\n", ITERATIONS / num_threads);
-    
+
     pthread_t* threads = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
     ThreadData* data = (ThreadData*)malloc(num_threads * sizeof(ThreadData));
-    
+
     int iter_per_thread = ITERATIONS / num_threads;
     Timer t;
     double total_woomem, total_malloc;
-    
+
     // woomem test
     timer_start(&t);
     for (int i = 0; i < num_threads; ++i) {
@@ -534,7 +536,7 @@ void bench_multithread(int num_threads)
         pthread_join(threads[i], NULL);
     }
     total_woomem = timer_elapsed_ms(&t);
-    
+
     // malloc test
     timer_start(&t);
     for (int i = 0; i < num_threads; ++i) {
@@ -546,12 +548,12 @@ void bench_multithread(int num_threads)
         pthread_join(threads[i], NULL);
     }
     total_malloc = timer_elapsed_ms(&t);
-    
+
     printf("Small objects (%d bytes):\n", SMALL_SIZE);
     printf("  woomem: %.2f ms (%.2f M ops/sec total)\n", total_woomem, ITERATIONS / total_woomem / 1000.0);
     printf("  malloc:  %.2f ms (%.2f M ops/sec total)\n", total_malloc, ITERATIONS / total_malloc / 1000.0);
     printf("  Speedup: %.2fx\n\n", total_malloc / total_woomem);
-    
+
     free(threads);
     free(data);
 }
@@ -565,13 +567,13 @@ int main(int argc, char** argv)
 {
     (void)argc;
     (void)argv;
-    
+
     printf("========================================\n");
     printf("  woomem vs malloc Performance Benchmark\n");
     printf("========================================\n");
-    
+
     woomem_init();
-    
+
     // 预热
     printf("\nWarming up...\n");
     for (int i = 0; i < 10000; ++i) {
@@ -580,23 +582,23 @@ int main(int argc, char** argv)
         p = malloc(64);
         free(p);
     }
-    
+
     // 运行各项测试
     bench_sequential_alloc_free();
     bench_batch_alloc_free();
     bench_random_sizes();
     bench_mixed_pattern();
-    
+
     // 多线程测试
     bench_multithread(2);
     bench_multithread(4);
     bench_multithread(8);
-    
+
     woomem_shutdown();
-    
+
     printf("========================================\n");
     printf("  Benchmark Complete!\n");
     printf("========================================\n");
-    
+
     return 0;
 }

@@ -791,34 +791,67 @@ namespace woomem_cppimpl
     // ============================================================================
     
     static CentralCache g_central_cache;
-    static thread_local ThreadCache* t_thread_cache = nullptr;
     static mutex g_thread_cache_list_mutex;
     static vector<ThreadCache*> g_thread_cache_list;
+
+#ifndef NDEBUG
     static atomic<bool> g_initialized{false};
+#endif
+    
+    // RAII 包装器，确保线程结束时自动清理 ThreadCache
+    struct ThreadCacheGuard {
+        ThreadCache* m_cache = nullptr;
+        
+        ~ThreadCacheGuard() {
+            if (m_cache 
+#ifndef NDEBUG
+                && g_initialized.load(memory_order_relaxed)
+#endif
+                ) {
+                // 线程结束时，归还所有缓存到中央缓存
+                m_cache->shutdown();
+                
+                // 从全局列表中移除
+                {
+                    lock_guard<mutex> lock(g_thread_cache_list_mutex);
+                    auto it = find(g_thread_cache_list.begin(), g_thread_cache_list.end(), m_cache);
+                    if (it != g_thread_cache_list.end()) {
+                        g_thread_cache_list.erase(it);
+                    }
+                }
+                
+                delete m_cache;
+                m_cache = nullptr;
+            }
+        }
+    };
+    
+    // 使用 thread_local 的 RAII 对象确保自动清理
+    static thread_local ThreadCacheGuard t_thread_cache_guard;
     
     ThreadCache* get_thread_cache() {
-        if (!t_thread_cache) {
-            t_thread_cache = new ThreadCache();
-            t_thread_cache->init(&g_central_cache);
+        if (!t_thread_cache_guard.m_cache) {
+            t_thread_cache_guard.m_cache = new ThreadCache();
+            t_thread_cache_guard.m_cache->init(&g_central_cache);
             
             lock_guard<mutex> lock(g_thread_cache_list_mutex);
-            g_thread_cache_list.push_back(t_thread_cache);
+            g_thread_cache_list.push_back(t_thread_cache_guard.m_cache);
         }
-        return t_thread_cache;
+        return t_thread_cache_guard.m_cache;
     }
     
     void cleanup_thread_cache() {
-        if (t_thread_cache) {
-            t_thread_cache->shutdown();
+        if (t_thread_cache_guard.m_cache) {
+            t_thread_cache_guard.m_cache->shutdown();
             
             lock_guard<mutex> lock(g_thread_cache_list_mutex);
-            auto it = find(g_thread_cache_list.begin(), g_thread_cache_list.end(), t_thread_cache);
+            auto it = find(g_thread_cache_list.begin(), g_thread_cache_list.end(), t_thread_cache_guard.m_cache);
             if (it != g_thread_cache_list.end()) {
                 g_thread_cache_list.erase(it);
             }
             
-            delete t_thread_cache;
-            t_thread_cache = nullptr;
+            delete t_thread_cache_guard.m_cache;
+            t_thread_cache_guard.m_cache = nullptr;
         }
     }
     
@@ -832,21 +865,21 @@ extern "C" {
 
 void woomem_init(void) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (g_initialized.exchange(true)) {
-        return; // 已经初始化
+        abort(); // 已经初始化
     }
-    
+#endif
     g_central_cache.init();
 }
 
 void woomem_shutdown(void) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!g_initialized.exchange(false)) {
-        return; // 未初始化或已关闭
+        abort(); // 未初始化或已关闭
     }
-    
+#endif
     // 清理所有线程缓存
     {
         lock_guard<mutex> lock(g_thread_cache_list_mutex);
@@ -856,7 +889,9 @@ void woomem_shutdown(void) {
         }
         g_thread_cache_list.clear();
     }
-    t_thread_cache = nullptr;
+    // 注意：当前线程的 t_thread_cache_guard.m_cache 已经在上面被删除了
+    // 需要将指针置空，避免 ThreadCacheGuard 析构时 double-free
+    t_thread_cache_guard.m_cache = nullptr;
     
     g_central_cache.shutdown();
 }
@@ -864,9 +899,11 @@ void woomem_shutdown(void) {
 void* woomem_alloc(size_t size) {
     using namespace woomem_cppimpl;
     
+#ifndef NDEBUG
     if (!g_initialized.load()) {
-        return nullptr;
+        abort();
     }
+#endif
     
     if (size == 0) {
         size = 1; // 最小分配 1 字节
@@ -877,21 +914,23 @@ void* woomem_alloc(size_t size) {
 
 void woomem_free(void* ptr) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!ptr || !g_initialized.load()) {
-        return;
+        abort();
     }
+#endif
     
     get_thread_cache()->free(ptr);
 }
 
 void* woomem_try_mark_self(intptr_t maybe_ptr) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!g_initialized.load()) {
-        return nullptr;
+        abort();
     }
-    
+#endif
+
     BlockHeader* header = g_central_cache.validate_ptr(maybe_ptr);
     if (!header) {
         return nullptr;
@@ -922,22 +961,22 @@ void* woomem_try_mark_self(intptr_t maybe_ptr) {
 
 void woomem_full_mark(void* ptr) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!ptr || !g_initialized.load()) {
-        return;
+        abort();
     }
-    
+#endif
     BlockHeader* header = get_header(ptr);
     header->m_gc_attr.m_gc_marked = WOOMEM_GC_MARKED_FULL_MARKED;
 }
 
 void woomem_begin_gc_mark(woomem_Bool is_full_gc) {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!g_initialized.load()) {
-        return;
+        abort();
     }
-    
+#endif
     // 在 GC 开始前，将所有线程缓存归还到中央缓存
     // 这确保 GC 可以遍历所有已分配的块
     {
@@ -956,11 +995,11 @@ void woomem_end_gc_mark_and_free_all_unmarked(
     void* userdata)
 {
     using namespace woomem_cppimpl;
-    
+#ifndef NDEBUG
     if (!g_initialized.load()) {
-        return;
+        abort();
     }
-    
+#endif
     g_central_cache.gc_sweep(destroy_func, userdata);
 }
 
