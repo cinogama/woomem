@@ -208,6 +208,30 @@ namespace woomem_cppimpl
     union Page
     {
         char m_entries[PAGE_SIZE];
+
+        struct 
+        {
+            PageHead m_page_head;
+
+            // Followed by many UnitHead + User Data.
+            char m_storage[PAGE_SIZE - sizeof(PageHead)];
+        };
+
+        void reinit_page_with_group(PageGroupType group_type, uint16_t first_unit_offset) noexcept
+        {
+            // Only empty and new page can be reinit.
+            assert(group_type != PageGroupType::LARGE);
+
+            m_page_head.m_page_belong_to_group = group_type;
+            m_page_head.m_next_alloc_unit_head_offset = sizeof(PageHead);
+            m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
+
+            const size_t unit_take_size_unit =
+                UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[group_type] + sizeof(UnitHead);
+
+
+            TODO;
+        }
     };
     static_assert(sizeof(Page) == PAGE_SIZE, 
         "Page size must be equal to PAGE_SIZE");
@@ -394,8 +418,8 @@ namespace woomem_cppimpl
                     current_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_relaxed);
 
                     while (!g_current_chunk.compare_exchange_weak(
-                        new_chunk->m_last_chunk,
-                        new_chunk,
+                        current_chunk->m_last_chunk,
+                        current_chunk,
                         std::memory_order_relaxed,
                         std::memory_order_relaxed))
                     {
