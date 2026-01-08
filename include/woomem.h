@@ -82,6 +82,11 @@ extern "C" {
     void* woomem_alloc(size_t size);
 
     /*
+    重新分配给定的内存单元为新的大小，并返回指向该内存单元的指针。
+    */
+    void* woomem_realloc(void* ptr, size_t new_size);
+
+    /*
     解分配给定的指针，该指针必须是合法的，与 woomem_try_mark_self 不同，分配器不会特地检
     查指定单元的合法性。
     */
