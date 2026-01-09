@@ -348,6 +348,7 @@ namespace woomem_cppimpl
 
             if (WOOMEM_LIKELY(next_alloc_unit_head_offset))
             {
+            _label_re_entry_for_reuse_free_list:
                 UnitHead* const allocating_unit_head =
                     reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
 
@@ -362,6 +363,18 @@ namespace woomem_cppimpl
                     allocating_unit_head->m_next_alloc_unit_offset;
 
                 return allocating_unit_head;
+            }
+
+            /* Retry with freed list. */
+            // NOTE: m_freed_unit_head_offset might be modified by other threads.
+            //      we need to exchange it with 0 first.
+            const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
+                0, std::memory_order_acquire);
+
+            if (free_list != 0)
+            {
+                m_page_head.m_next_alloc_unit_head_offset = free_list;
+                goto _label_re_entry_for_reuse_free_list;
             }
             return nullptr;
         }
@@ -379,15 +392,14 @@ namespace woomem_cppimpl
                     std::memory_order_relaxed)))
             {
                 // Ok, this unit is freed by current thread now
-                freeing_unit_head->m_next_alloc_unit_offset =
-                    m_page_head.m_freed_unit_head_offset.load(
-                        std::memory_order_relaxed);
-
                 const uint16_t current_unit_offset =
                     static_cast<uint16_t>(
                         reinterpret_cast<char*>(freeing_unit_head) -
                         m_entries);
 
+                freeing_unit_head->m_next_alloc_unit_offset =
+                    m_page_head.m_freed_unit_head_offset.load(
+                        std::memory_order_relaxed);
                 do
                 {
                     // Do nothing.
