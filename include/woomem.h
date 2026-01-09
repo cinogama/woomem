@@ -20,8 +20,8 @@ extern "C" {
         WOOMEM_GC_UNIT_TYPE_NORMAL = 0,
 
         /*
-        这一片内存可能包含一个或多个 GC 单元，当其自身被标记时，会自动标记其引用的其他内
-        存单元。
+        这一片内存可能包含一个或多个 GC 单元的 `引用`，当标记这片内存时，会自动标记其引用
+        的其他内存单元。
         */
         WOOMEM_GC_UNIT_TYPE_AUTO_MARK = 1,
 
@@ -77,7 +77,9 @@ extern "C" {
     /*
     分配指定大小的内存单元，并返回指向该内存单元的指针。
     */
-    /* OPTIONAL */ void* woomem_alloc(size_t size);
+    /* OPTIONAL */ void* woomem_alloc_normal(size_t size);
+    /* OPTIONAL */ void* woomem_alloc_auto_mark(size_t size);
+    /* OPTIONAL */ void* woomem_alloc_gcunit(size_t size);
 
     /*
     重新分配给定的内存单元为新的大小，并返回新的指针。
