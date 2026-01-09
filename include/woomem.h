@@ -10,6 +10,30 @@ extern "C" {
     void woomem_shutdown(void);
 
     /*
+    woomem_GCUnitType
+    */
+    typedef enum woomem_GCUnitType
+    {
+        /*
+        这一片内存既不是 GC单元，也不用于存储其他 GC 分配的内存，只是普通的内存分配单元。
+        */
+        WOOMEM_GC_UNIT_TYPE_NORMAL = 0,
+
+        /*
+        这一片内存可能包含一个或多个 GC 单元，当其自身被标记时，会自动标记其引用的其他内
+        存单元。
+        */
+        WOOMEM_GC_UNIT_TYPE_AUTO_MARK = 1,
+
+        /*
+        这一片内存储存一个 GC 单元，其被标记和回收时，会触发指定的标记/回收回调。同时，
+        与 WOOMEM_GC_UNIT_TYPE_AUTO_MARK 类似，这片内存引用的其他内存单元也会被自动标记。
+        */
+        WOOMEM_GC_UNIT_TYPE_IS_GCUNIT = 2,
+
+    } woomem_GCUnitType;
+
+    /*
     woomem_GCMarkedType
     */
     typedef enum woomem_GCMarkedType
@@ -48,49 +72,23 @@ extern "C" {
 
     } woomem_Bool;
 
-    /*
-    woomem_MemoryAttribute
-    每个分配的内存单元都会携带一个 woomem_MemoryAttribute 属性，用于存储该内存单元的垃圾回收相关信息。
-    */
-    typedef struct woomem_MemoryAttribute
-    {
-        /* 
-        m_gc_age: 初始值为 15，该单元每存活过一轮回收，此值将减少 1 直到其归零成为老年代对象 
-        */
-        uint8_t m_gc_age : 4;
-
-        /*
-        m_gc_marked: 初始值为 WOOMEM_GC_MARKED_UNMARKED，表示该内存单元的垃圾回收标记状态
-        */
-        uint8_t m_gc_marked : 2;
-
-        /*
-        m_alloc_timing: 记录该内存单元的分配时间点，用于区分不同回收周期内分配的内存单元，初始值由内部
-            计数器决定，每次调用 woomem_begin_gc_mark，内部计数器将推进 1；内部计数器将在 0-3 之间循环。
-            释放操作始终不考虑当前GC轮次分配的内存单元（即 m_alloc_timing 等于当前轮次值，且年龄为 15 的
-            内存单元）。
-        */
-        uint8_t m_alloc_timing : 2;
-
-    } woomem_MemoryAttribute;
-
     typedef void (*woomem_DestroyFunc)(void*, void*);
 
     /*
     分配指定大小的内存单元，并返回指向该内存单元的指针。
     */
-    void* woomem_alloc(size_t size);
+    /* OPTIONAL */ void* woomem_alloc(size_t size);
 
     /*
-    重新分配给定的内存单元为新的大小，并返回指向该内存单元的指针。
+    重新分配给定的内存单元为新的大小，并返回新的指针。
     */
-    void* woomem_realloc(void* ptr, size_t new_size);
+    /* OPTIONAL */ void* woomem_realloc(void* ptr, size_t new_size);
 
     /*
     解分配给定的指针，该指针必须是合法的，与 woomem_try_mark_self 不同，分配器不会特地检
     查指定单元的合法性。
     */
-    void woomem_free(void* ptr);
+    /* OPTIONAL */ void woomem_free(void* ptr);
 
     /*
     GC接口，外部的GC实现通过此接口尝试检查和初步标记一个可能的地址，如果：
@@ -100,8 +98,11 @@ extern "C" {
         4）正在执行 MINOR_GC且当前对象是老年代，
 
     则返回 NULL，否则将该单元标记为 WOOMEM_GC_MARKED_SELF_MARKED 并返回该单元的实际地址。
+
+    如果一个对象即将从新生代晋升为老年代，则 *out_becoming_old 将被设置为 WOOMEM_BOOL_TRUE，
+    否则为 WOOMEM_BOOL_FALSE。
     */
-    /* OPTIONAL */ void* woomem_try_mark_self(intptr_t maybe_ptr);
+    /* OPTIONAL */ void* woomem_try_mark_self(intptr_t maybe_ptr, woomem_Bool* out_becoming_old);
 
     /*
     GC接口，当外部的GC实现完成对某个单元的完整扫描后，调用此接口将该单元的 m_gc_marked 标记为

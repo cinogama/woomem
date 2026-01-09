@@ -39,6 +39,8 @@ namespace woomem_cppimpl
 
     constexpr size_t BASE_ALIGNMENT = 8;                // 8 Bytes
 
+    constexpr uint8_t NEW_BORN_GC_AGE = 15;
+
     enum PageGroupType : uint8_t
     {
         SMALL_8,
@@ -282,12 +284,15 @@ namespace woomem_cppimpl
         Page* m_parent_page;
 
         atomic_uint8_t m_allocated_status; // 0 = freed, 1 = allocated
-        atomic<woomem_MemoryAttribute> m_attribute;
+
+        uint8_t         m_alloc_timing : 4;
+        uint8_t /* woomem_GCUnitType */
+                        m_gc_type : 4;
+        uint8_t         m_gc_age;
+        atomic_uint8_t  m_gc_marked;
 
         uint16_t m_next_alloc_unit_offset;
     };
-    static_assert(atomic<woomem_MemoryAttribute>::is_always_lock_free,
-        "atomic<woomem_MemoryAttribute> must be lock free for performance");
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
 
@@ -330,10 +335,12 @@ namespace woomem_cppimpl
                 unit_head->m_parent_page = this;
                 unit_head->m_allocated_status.store(0, std::memory_order_relaxed);
 
-                next_unit_offset_ptr = &unit_head->m_next_alloc_unit_offset;
+                /* unit_head->m_alloc_timing will be set when allocate. */
+                unit_head->m_gc_age = NEW_BORN_GC_AGE;
+                unit_head->m_gc_marked.store(
+                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
 
-                // Donot need init m_attribute here.
-                /* unit_head->m_attribute; */
+                next_unit_offset_ptr = &unit_head->m_next_alloc_unit_offset;
             }
             *next_unit_offset_ptr = 0; // End of units.
         }
@@ -355,7 +362,7 @@ namespace woomem_cppimpl
                 assert(0 == allocating_unit_head->m_allocated_status.load(std::memory_order_relaxed));
 
                 /*
-                ATTENTION: Attribute and allocated flag will be set after 
+                ATTENTION: Attribute and allocated flag will be set after
                         this function returns.
                 */
 
@@ -396,6 +403,11 @@ namespace woomem_cppimpl
                     static_cast<uint16_t>(
                         reinterpret_cast<char*>(freeing_unit_head) -
                         m_entries);
+
+                // Reset GC attribute, avoid set them in allocation path.
+                freeing_unit_head->m_gc_age = NEW_BORN_GC_AGE;
+                freeing_unit_head->m_gc_marked.store(
+                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
 
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
@@ -632,16 +644,21 @@ namespace woomem_cppimpl
     struct GlobalPageCollection
     {
         /*
-        
+
         */
         /* OPTIONAL */ PageHead* try_get_free_page(PageGroupType group_type) noexcept
         {
+            Chunk::allocate_new_page();
+
             // TODO;
             return nullptr;
         }
     };
     struct ThreadLocalPageCollection
     {
+        /*
+
+        */
     };
 
     // Will be inited in `woomem_init`
