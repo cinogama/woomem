@@ -68,7 +68,7 @@ namespace woomem_cppimpl
 
         LARGE,
 
-        TOTAL_GROUP_COUNT,
+        TOTAL_GROUP_COUNT = LARGE,
     };
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
     {
@@ -399,7 +399,7 @@ namespace woomem_cppimpl
 
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
-                        std::memory_order_relaxed);
+                        std::memory_order_acquire);
                 do
                 {
                     // Do nothing.
@@ -409,7 +409,7 @@ namespace woomem_cppimpl
                         freeing_unit_head->m_next_alloc_unit_offset,
                         current_unit_offset,
                         std::memory_order_release,
-                        std::memory_order_relaxed));
+                        std::memory_order_acquire));
             }
             // Else: this unit might be freed by GC, or double free detected.
             assert(expected_status == 0);
@@ -606,13 +606,13 @@ namespace woomem_cppimpl
                     }
 
                     current_chunk = new (chunk_storage) Chunk(reserved_address);
-                    current_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_relaxed);
+                    current_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_acquire);
 
                     while (!g_current_chunk.compare_exchange_weak(
                         current_chunk->m_last_chunk,
                         current_chunk,
-                        std::memory_order_relaxed,
-                        std::memory_order_relaxed))
+                        std::memory_order_release,
+                        std::memory_order_acquire))
                     {
                         // Retry updating last chunk.
                     }
@@ -631,12 +631,17 @@ namespace woomem_cppimpl
 
     struct GlobalPageCollection
     {
-        union FreePageOrLargeUnit
+        /*
+        
+        */
+        /* OPTIONAL */ PageHead* try_get_free_page(PageGroupType group_type) noexcept
         {
-            atomic<Page*> m_free_page;
-        };
-        FreePageOrLargeUnit m_group_free_pages_and_large_unit[TOTAL_GROUP_COUNT];
-
+            // TODO;
+            return nullptr;
+        }
+    };
+    struct ThreadLocalPageCollection
+    {
     };
 
     // Will be inited in `woomem_init`
