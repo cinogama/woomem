@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <atomic>
 #include <new>
-#include <mutex>
 #include <thread>
 #include <vector>
 #include <algorithm>
@@ -42,28 +41,30 @@ namespace woomem_cppimpl
 
     enum PageGroupType : uint8_t
     {
-        SMALL_8B,
-        SMALL_16B,
-        SMALL_24B,
-        SMALL_32B,
-        SMALL_48B,
-        SMALL_64B,
-        SMALL_80B,
-        SMALL_96B,
-        SMALL_112B,
-        SMALL_128B,
-        SMALL_192B,
-        SMALL_256B,
-        SMALL_384B,
-        SMALL_512B,
-        SMALL_768B,
-        SMALL_1032B,
+        SMALL_8,
+        SMALL_24,
+        SMALL_40,
+        SMALL_56,
+        SMALL_88,
+        SMALL_128,
+        SMALL_192,
+        SMALL_264,
+        SMALL_344,
+        SMALL_488,
+        SMALL_704,
+        SMALL_920,
+        SMALL_1024,
 
-        MEDIUM_2176B,
-        MEDIUM_4360B,
-        MEDIUM_9352B,
-        MEDIUM_21832B,
-        MEDIUM_65520B,
+        MIDIUM_1440,
+        MIDIUM_2168,
+        MIDIUM_3104,
+        MIDIUM_4352,
+        MIDIUM_6536,
+        MIDIUM_9344,
+        MIDIUM_13088,
+        MIDIUM_21824,
+        MIDIUM_32744,
+        MIDIUM_65504,
 
         LARGE,
 
@@ -71,106 +72,189 @@ namespace woomem_cppimpl
     };
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
     {
-        8, 
-        16, 
-        24, 
-        32,
-        48, 
-        64, 
-        80, 
-        96,
-        112, 
-        128, 
-        192, 
-        256, 
-        384, 
-        512, 
-        768, 
-        1032,
-        2176, 
-        4360,
-        9352, 
-        21832,
-        65520,
+        // Small page groups
+        8, 24, 40, 56, 88, 128, 192, 264, 344, 488, 704, 920, 1024,
+
+        // Medium page groups
+        1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 32744, 65504,
     };
-    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1032B] == 1032,
+    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
-    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MEDIUM_65520B] == 65520,
+    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_65504] == 65504,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
 
-    constexpr size_t MAX_SMALL_UNIT_SIZE = 1032;
+    constexpr size_t MAX_SMALL_UNIT_SIZE = 1024;
     constexpr size_t SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE =
         (MAX_SMALL_UNIT_SIZE + 7) / 8 + 1;
 
     // SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(AllocSize + 7) >> 3]
     constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
     {
-        SMALL_8B,   // 0
-        SMALL_8B,   // 8
-        SMALL_16B,  // 16
-        SMALL_24B,  // 24
-        SMALL_32B,  // 32
-        SMALL_48B, SMALL_48B,   // 40, 48
-        SMALL_64B, SMALL_64B,    // 56, 64
-        SMALL_80B, SMALL_80B,   // 72, 80
-        SMALL_96B, SMALL_96B,   // 88, 96
-        SMALL_112B, SMALL_112B, // 104, 112
-        SMALL_128B, SMALL_128B, // 120, 128
-        SMALL_192B, SMALL_192B, SMALL_192B, SMALL_192B,
-        SMALL_192B, SMALL_192B, SMALL_192B, SMALL_192B, // 136..192
-        SMALL_256B, SMALL_256B, SMALL_256B, SMALL_256B,
-        SMALL_256B, SMALL_256B, SMALL_256B, SMALL_256B, // 200..256
-        SMALL_384B, SMALL_384B, SMALL_384B, SMALL_384B,
-        SMALL_384B, SMALL_384B, SMALL_384B, SMALL_384B,
-        SMALL_384B, SMALL_384B, SMALL_384B, SMALL_384B,
-        SMALL_384B, SMALL_384B, SMALL_384B, SMALL_384B, // 264..384
-        SMALL_512B, SMALL_512B, SMALL_512B, SMALL_512B,
-        SMALL_512B, SMALL_512B, SMALL_512B, SMALL_512B,
-        SMALL_512B, SMALL_512B, SMALL_512B, SMALL_512B,
-        SMALL_512B, SMALL_512B, SMALL_512B, SMALL_512B, // 392..512
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B,
-        SMALL_768B, SMALL_768B, SMALL_768B, SMALL_768B, // 520..768
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, SMALL_1032B, SMALL_1032B, SMALL_1032B,
-        SMALL_1032B, // 776..MAX_SMALL_UNIT_SIZE
+        SMALL_8,
+        SMALL_8,
+        SMALL_24,
+        SMALL_24,
+        SMALL_40,
+        SMALL_40,
+        SMALL_56,
+        SMALL_56,
+        SMALL_88,
+        SMALL_88,
+        SMALL_88,
+        SMALL_88,
+        SMALL_128,
+        SMALL_128,
+        SMALL_128,
+        SMALL_128,
+        SMALL_128,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_192,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_264,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_344,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_488,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_704,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_920,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
+        SMALL_1024,
     };
-    static_assert(sizeof(SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B) == (MAX_SMALL_UNIT_SIZE + 7) / 8 + 1,
+    static_assert(sizeof(SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B) == SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE,
         "SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B used for alloc(<= MAX_SMALL_UNIT_SIZE).");
-    static_assert(SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(MAX_SMALL_UNIT_SIZE + 7) / 8] == SMALL_1032B,
+    static_assert(SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE - 1] == SMALL_1024,
         "SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B must be filled correctly.");
 
     WOOMEM_FORCE_INLINE PageGroupType get_page_group_type_for_size(size_t size)
     {
-        if (WOOMEM_LIKELY(size <= 1024))
+        if (WOOMEM_LIKELY(size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024]))
         {
             return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(size + 7) >> 3];
         }
         else
         {
-            if (WOOMEM_LIKELY(size <= 65520))
+            if (WOOMEM_LIKELY(size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_65504]))
             {
-                if (size <= 2176)
-                    return MEDIUM_2176B;
-                else if (size <= 4360)
-                    return MEDIUM_4360B;
-                else if (size <= 9352)
-                    return MEDIUM_9352B;
-                else if (size <= 21832)
-                    return MEDIUM_21832B;
-                else
-                    return MEDIUM_65520B;
+                if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_1440])
+                    return MIDIUM_1440;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_2168])
+                    return MIDIUM_2168;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_3104])
+                    return MIDIUM_3104;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_4352])
+                    return MIDIUM_4352;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_6536])
+                    return MIDIUM_6536;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_9344])
+                    return MIDIUM_9344;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_13088])
+                    return MIDIUM_13088;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_21824])
+                    return MIDIUM_21824;
+                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_32744])
+                    return MIDIUM_32744;
+                else /* size <= 65504 */
+                    return MIDIUM_65504;
             }
             else
             {
@@ -181,35 +265,37 @@ namespace woomem_cppimpl
 
     struct PageHead
     {
-        alignas(8) PageGroupType m_page_belong_to_group;
+        PageHead* m_next_freed_page;
+
+        PageGroupType m_page_belong_to_group;
 
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
     };
-    static_assert(sizeof(PageHead) == 8 && alignof(PageHead) == 8,
+    static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 8,
         "PageHead size and alignment must be correct.");
 
+    union Page;
     struct UnitHead
     {
-        alignas(8) atomic_uint8_t m_allocated_status;
-        atomic<woomem_MemoryAttribute> 
-            m_attribute;
+        /* Used for user free. */
+        Page* m_parent_page;
 
-        atomic_uint16_t 
-            m_next_free_unit_offset;
-        uint16_t 
-            m_next_alloc_unit_offset;
+        atomic_uint8_t m_allocated_status; // 0 = freed, 1 = allocated
+        atomic<woomem_MemoryAttribute> m_attribute;
+
+        uint16_t m_next_alloc_unit_offset;
     };
     static_assert(atomic<woomem_MemoryAttribute>::is_always_lock_free,
         "atomic<woomem_MemoryAttribute> must be lock free for performance");
-    static_assert(sizeof(UnitHead) == 8 && alignof(UnitHead) == 8,
+    static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
 
     union Page
     {
         char m_entries[PAGE_SIZE];
 
-        struct 
+        struct
         {
             PageHead m_page_head;
 
@@ -223,17 +309,110 @@ namespace woomem_cppimpl
             assert(group_type != PageGroupType::LARGE);
 
             m_page_head.m_page_belong_to_group = group_type;
-            m_page_head.m_next_alloc_unit_head_offset = sizeof(PageHead);
             m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
 
             const size_t unit_take_size_unit =
                 UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[group_type] + sizeof(UnitHead);
 
+            uint16_t* next_unit_offset_ptr =
+                &m_page_head.m_next_alloc_unit_head_offset;
 
-            TODO;
+            for (uint16_t current_unit_head_begin = sizeof(PageHead);
+                static_cast<size_t>(current_unit_head_begin) + unit_take_size_unit <= PAGE_SIZE;
+                current_unit_head_begin += static_cast<uint16_t>(unit_take_size_unit))
+            {
+                *next_unit_offset_ptr = current_unit_head_begin;
+
+                // Init unit head here.
+                UnitHead* unit_head =
+                    reinterpret_cast<UnitHead*>(&m_storage[current_unit_head_begin]);
+
+                unit_head->m_parent_page = this;
+                unit_head->m_allocated_status.store(0, std::memory_order_relaxed);
+
+                next_unit_offset_ptr = &unit_head->m_next_alloc_unit_offset;
+
+                // Donot need init m_attribute here.
+                /* unit_head->m_attribute; */
+            }
+            *next_unit_offset_ptr = 0; // End of units.
+        }
+
+        /*
+        ATTENTION: This page must belong current thread's TlsPageCollection.
+        */
+        /* OPTIONAL */ UnitHead* try_allocate_unit_from_page() noexcept
+        {
+            const auto next_alloc_unit_head_offset =
+                m_page_head.m_next_alloc_unit_head_offset;
+
+            if (WOOMEM_LIKELY(next_alloc_unit_head_offset))
+            {
+                UnitHead* const allocating_unit_head =
+                    reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
+
+                assert(0 == allocating_unit_head->m_allocated_status.load(std::memory_order_relaxed));
+
+                /*
+                ATTENTION: Attribute and allocated flag will be set after 
+                        this function returns.
+                */
+
+                m_page_head.m_next_alloc_unit_head_offset =
+                    allocating_unit_head->m_next_alloc_unit_offset;
+
+                return allocating_unit_head;
+            }
+            return nullptr;
+        }
+        void free_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
+        {
+            assert(freeing_unit_head->m_parent_page == this);
+            assert(0 != freeing_unit_head->m_allocated_status.load(std::memory_order_relaxed));
+
+            uint8_t expected_status = 1;
+            if (WOOMEM_LIKELY(
+                freeing_unit_head->m_allocated_status.compare_exchange_strong(
+                    expected_status,
+                    0,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)))
+            {
+                // Ok, this unit is freed by current thread now
+                freeing_unit_head->m_next_alloc_unit_offset =
+                    m_page_head.m_freed_unit_head_offset.load(
+                        std::memory_order_relaxed);
+
+                const uint16_t current_unit_offset =
+                    static_cast<uint16_t>(
+                        reinterpret_cast<char*>(freeing_unit_head) -
+                        m_entries);
+
+                do
+                {
+                    // Do nothing.
+
+                } while (
+                    !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
+                        freeing_unit_head->m_next_alloc_unit_offset,
+                        current_unit_offset,
+                        std::memory_order_release,
+                        std::memory_order_relaxed));
+            }
+            // Else: this unit might be freed by GC, or double free detected.
+            assert(expected_status == 0);
+        }
+
+        static void free_page_unit_asyncly(void* valid_page_unit)
+        {
+            UnitHead* unit_head =
+                reinterpret_cast<UnitHead*>(
+                    reinterpret_cast<char*>(valid_page_unit) - sizeof(UnitHead));
+
+            unit_head->m_parent_page->free_unit_in_this_page_asyncly(unit_head);
         }
     };
-    static_assert(sizeof(Page) == PAGE_SIZE, 
+    static_assert(sizeof(Page) == PAGE_SIZE,
         "Page size must be equal to PAGE_SIZE");
 
     struct Chunk
@@ -436,6 +615,16 @@ namespace woomem_cppimpl
             // Never reach here.
             abort();
         }
+    };
+
+    struct GlobalPageCollection
+    {
+        union FreePageOrLargeUnit
+        {
+            atomic<Page*> m_free_page;
+        };
+        FreePageOrLargeUnit m_group_free_pages_and_large_unit[TOTAL_GROUP_COUNT];
+
     };
 
     // Will be inited in `woomem_init`
