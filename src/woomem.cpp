@@ -233,36 +233,33 @@ namespace woomem_cppimpl
         {
             return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(size + 7) >> 3];
         }
+        else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_65504])
+        {
+            if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_1440])
+                return MIDIUM_1440;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_2168])
+                return MIDIUM_2168;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_3104])
+                return MIDIUM_3104;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_4352])
+                return MIDIUM_4352;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_6536])
+                return MIDIUM_6536;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_9344])
+                return MIDIUM_9344;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_13088])
+                return MIDIUM_13088;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_21824])
+                return MIDIUM_21824;
+            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_32744])
+                return MIDIUM_32744;
+            else /* size <= 65504 */
+                return MIDIUM_65504;
+        }
         else
         {
-            if (WOOMEM_LIKELY(size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_65504]))
-            {
-                if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_1440])
-                    return MIDIUM_1440;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_2168])
-                    return MIDIUM_2168;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_3104])
-                    return MIDIUM_3104;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_4352])
-                    return MIDIUM_4352;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_6536])
-                    return MIDIUM_6536;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_9344])
-                    return MIDIUM_9344;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_13088])
-                    return MIDIUM_13088;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_21824])
-                    return MIDIUM_21824;
-                else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_32744])
-                    return MIDIUM_32744;
-                else /* size <= 65504 */
-                    return MIDIUM_65504;
-            }
-            else
-            {
-                return LARGE;
-            }
-        }
+            return LARGE;
+        }+
     }
 
     struct PageHead
@@ -287,7 +284,7 @@ namespace woomem_cppimpl
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-                        m_gc_type : 4;
+            m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
