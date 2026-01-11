@@ -259,7 +259,7 @@ namespace woomem_cppimpl
         else
         {
             return LARGE;
-        }+
+        }
     }
 
     struct PageHead
@@ -267,6 +267,17 @@ namespace woomem_cppimpl
         PageHead* m_next_freed_page;
 
         PageGroupType m_page_belong_to_group;
+
+        // m_free_times 将在 m_next_alloc_unit_head_offset 耗尽之后重设，
+        // 然后检查 m_freed_unit_head_offset，如果页面彻底耗尽，没有空余
+        // 单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
+        // 
+        // m_abondon_page_flag 将在页面被抛弃时设置
+        //
+        // 将统计被抛弃的页面总数，达到一定值时，GC 将把可以复用的页面重新
+        // 拉起。
+        atomic_uint8_t  m_abondon_page_flag;
+        atomic_uint16_t m_free_times;
 
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
@@ -305,12 +316,14 @@ namespace woomem_cppimpl
             char m_storage[PAGE_SIZE - sizeof(PageHead)];
         };
 
-        void reinit_page_with_group(PageGroupType group_type, uint16_t first_unit_offset) noexcept
+        void reinit_page_with_group(PageGroupType group_type) noexcept
         {
             // Only empty and new page can be reinit.
             assert(group_type != PageGroupType::LARGE);
 
             m_page_head.m_page_belong_to_group = group_type;
+            m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
+            m_page_head.m_free_times.store(0, std::memory_order_relaxed);
             m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
 
             const size_t unit_take_size_unit =
@@ -370,10 +383,17 @@ namespace woomem_cppimpl
             }
 
             /* Retry with freed list. */
+
+            // Reset free times count.
+            // NOTE: m_free_times must happend before m_freed_unit_head_offset.
+            //      or m_free_time might missing count.
+            (void)m_page_head.m_free_times.store(0, std::memory_order_relaxed);
+
+            // Make sure `m_page_head` store happend before load of `m_freed_unit_head_offset`.
             // NOTE: m_freed_unit_head_offset might be modified by other threads.
             //      we need to exchange it with 0 first.
             const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
-                0, std::memory_order_acquire);
+                0, std::memory_order_acq_rel);
 
             if (free_list != 0)
             {
@@ -412,6 +432,7 @@ namespace woomem_cppimpl
                 do
                 {
                     // Do nothing.
+                    std::this_thread::yield();
 
                 } while (
                     !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
@@ -419,6 +440,11 @@ namespace woomem_cppimpl
                         current_unit_offset,
                         std::memory_order_release,
                         std::memory_order_acquire));
+
+                // Count for page reuses.
+                // NOTE: Use release order to make sure count operation always happend 
+                //      after the free operation.
+                (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
             }
             // Else: this unit might be freed by GC, or double free detected.
             assert(expected_status == 0);
@@ -491,7 +517,8 @@ namespace woomem_cppimpl
             (void)release_status;
         }
 
-        /* OPTIONAL */ Page* allocate_new_page_in_chunk(bool* out_page_run_out) noexcept
+        /* OPTIONAL */ Page* allocate_new_page_in_chunk(
+            PageGroupType page_group, bool* out_page_run_out) noexcept
         {
             size_t new_page_index =
                 m_next_commiting_page_count.fetch_add(1, std::memory_order_relaxed);
@@ -500,12 +527,16 @@ namespace woomem_cppimpl
             {
                 *out_page_run_out = false;
 
+                Page* new_alloc_page = &m_reserved_address_begin[new_page_index];
                 const auto status = woomem_os_commit_memory(
-                    &m_reserved_address_begin[new_page_index],
+                    new_alloc_page,
                     PAGE_SIZE);
 
                 if (status == 0)
                 {
+                    // Init this page.
+                    new_alloc_page->reinit_page_with_group(page_group);
+
                     // Wait until other threads finish committing.
                     do
                     {
@@ -579,7 +610,7 @@ namespace woomem_cppimpl
             }
         }
 
-        static /* OPTIONAL */ Page* allocate_new_page()
+        static /* OPTIONAL */ Page* allocate_new_page(PageGroupType page_group)
         {
             Chunk* current_chunk =
                 g_current_chunk.load(std::memory_order_relaxed);
@@ -587,7 +618,7 @@ namespace woomem_cppimpl
             do
             {
                 bool page_run_out;
-                Page* new_page = current_chunk->allocate_new_page_in_chunk(&page_run_out);
+                Page* new_page = current_chunk->allocate_new_page_in_chunk(page_group, &page_run_out);
 
                 if (WOOMEM_UNLIKELY(page_run_out))
                 {
@@ -624,6 +655,7 @@ namespace woomem_cppimpl
                         std::memory_order_acquire))
                     {
                         // Retry updating last chunk.
+                        std::this_thread::yield();
                     }
                     continue;
                 }
@@ -638,12 +670,19 @@ namespace woomem_cppimpl
         }
     };
 
+
+    
     struct GlobalPageCollection
     {
         /*
 
         */
-        /* OPTIONAL */ PageHead* try_get_free_page(PageGroupType group_type) noexcept
+        struct FreedPageFIFOLockfree
+        {
+            atomic<Page*> m_next_free_page;
+        }
+
+        /* OPTIONAL */ Page* try_get_free_page(PageGroupType group_type) noexcept
         {
             Chunk::allocate_new_page();
 
@@ -651,11 +690,22 @@ namespace woomem_cppimpl
             return nullptr;
         }
     };
+
     struct ThreadLocalPageCollection
     {
         /*
+        内存分配策略：
+        ThreadLocalPageCollection 针对每一个分配组都缓存若干个 Page；如果某次分配中，页面报告其自身简单耗尽，
+        则轮转到下一个页面；轮转时如果页面的 m_next_alloc_unit_head_offset 为空，则从 m_freed_unit_head_offset
+        中提取；如果 m_freed_unit_head_offset 也为空，则称此时的分配组耗尽（即认为当前这些 Page 已经完全耗尽）。
 
+        对于耗尽的分配组，ThreadLocalPageCollection 从 GlobalPageCollection 重新提取若干个空闲页面作为新的分配组
+        旧的分配组将被继续缓存在 ThreadLocalPageCollection 中，
         */
+        struct ActivePageFIFO
+        {
+            PageHead* 
+        };
     };
 
     // Will be inited in `woomem_init`
