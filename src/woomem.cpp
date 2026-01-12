@@ -292,13 +292,13 @@ namespace woomem_cppimpl
     struct UnitHead
     {
         /* Used for user free. */
-        Page*           m_parent_page;
+        Page* m_parent_page;
 
         atomic_uint8_t  m_allocated_status; // 0 = freed, 1 = allocated
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-                        m_gc_type : 4;
+            m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
@@ -428,40 +428,46 @@ namespace woomem_cppimpl
             }
             return false;
         }
+        void drop_back_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
+        {
+            assert(freeing_unit_head->m_parent_page == this);
+            assert(0 == freeing_unit_head->m_allocated_status.load(std::memory_order_relaxed));
+
+            freeing_unit_head->m_next_alloc_unit_offset =
+                m_page_head.m_freed_unit_head_offset.load(
+                    std::memory_order_relaxed);
+
+            // Ok, this unit is freed by current thread now
+            const uint16_t current_unit_offset =
+                static_cast<uint16_t>(
+                    reinterpret_cast<char*>(freeing_unit_head) -
+                    m_entries);
+
+            assert(current_unit_offset % 8 == 0);
+
+            while (
+                !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
+                    freeing_unit_head->m_next_alloc_unit_offset,
+                    current_unit_offset,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+            {
+                WOOMEM_PAUSE();
+            }
+
+            // Count for page reuses.
+            // NOTE: Use release order to make sure count operation always happend 
+            //      after the free operation.
+            (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
+        }
         void free_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
         {
             assert(freeing_unit_head->m_parent_page == this);
-            assert(0 != freeing_unit_head->m_allocated_status.load(std::memory_order_relaxed));
 
             if (freeing_unit_head->try_free_this_unit_head())
             {
-                // Ok, this unit is freed by current thread now
-                const uint16_t current_unit_offset =
-                    static_cast<uint16_t>(
-                        reinterpret_cast<char*>(freeing_unit_head) -
-                        m_entries);
-
-                assert(current_unit_offset % 8 == 0);
-
-                freeing_unit_head->m_next_alloc_unit_offset =
-                    m_page_head.m_freed_unit_head_offset.load(
-                        std::memory_order_relaxed);
-
-                while (
-                    !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
-                        freeing_unit_head->m_next_alloc_unit_offset,
-                        current_unit_offset,
-                        std::memory_order_release,
-                        std::memory_order_relaxed))
-                {
-                    WOOMEM_PAUSE();
-                }
-
-                // Count for page reuses.
-                // NOTE: Use release order to make sure count operation always happend 
-                //      after the free operation.
-                (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
-            }        
+                drop_back_unit_in_this_page_asyncly(freeing_unit_head);
+            }
         }
 
         static void free_page_unit_asyncly(void* valid_page_unit)
@@ -916,7 +922,21 @@ namespace woomem_cppimpl
                 t < PageGroupType::LARGE;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
-                Page* const first_freeing_page = m_current_allocating_page_for_group[t].m_allocating_page;
+                auto& group = m_current_allocating_page_for_group[t];
+
+                // Drop all cached free units.
+                UnitHead* freeing_unit_head = group.m_free_unit_head;
+                while (freeing_unit_head != nullptr)
+                {
+                    UnitHead* const next_freeing_unit_head =
+                        *reinterpret_cast<UnitHead**>(
+                            reinterpret_cast<char*>(freeing_unit_head) + sizeof(UnitHead));
+
+                    freeing_unit_head->m_parent_page->drop_back_unit_in_this_page_asyncly(freeing_unit_head);
+                    freeing_unit_head = next_freeing_unit_head;
+                }
+
+                Page* const first_freeing_page = group.m_allocating_page;
                 Page* freeing_page = first_freeing_page;
                 do
                 {
