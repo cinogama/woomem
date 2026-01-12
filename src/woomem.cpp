@@ -262,9 +262,10 @@ namespace woomem_cppimpl
         }
     }
 
+    union Page;
     struct PageHead
     {
-        PageHead* m_next_freed_page;
+        Page* m_next_page;
 
         PageGroupType m_page_belong_to_group;
 
@@ -285,13 +286,12 @@ namespace woomem_cppimpl
     static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 8,
         "PageHead size and alignment must be correct.");
 
-    union Page;
     struct UnitHead
     {
         /* Used for user free. */
         Page* m_parent_page;
 
-        atomic_uint8_t m_allocated_status; // 0 = freed, 1 = allocated
+        atomic_uint8_t  m_allocated_status; // 0 = freed, 1 = allocated
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
@@ -369,7 +369,8 @@ namespace woomem_cppimpl
                 UnitHead* const allocating_unit_head =
                     reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
 
-                assert(0 == allocating_unit_head->m_allocated_status.load(std::memory_order_relaxed));
+                assert(0 == allocating_unit_head->m_allocated_status.load(
+                    std::memory_order_relaxed));
 
                 /*
                 ATTENTION: Attribute and allocated flag will be set after
@@ -382,25 +383,29 @@ namespace woomem_cppimpl
                 return allocating_unit_head;
             }
 
-            /* Retry with freed list. */
+            return nullptr;
+        }
+        bool try_tidy_page() noexcept
+        {
+            assert(m_page_head.m_next_alloc_unit_head_offset == 0);
 
             // Reset free times count.
             // NOTE: m_free_times must happend before m_freed_unit_head_offset.
             //      or m_free_time might missing count.
-            (void)m_page_head.m_free_times.store(0, std::memory_order_relaxed);
-
-            // Make sure `m_page_head` store happend before load of `m_freed_unit_head_offset`.
-            // NOTE: m_freed_unit_head_offset might be modified by other threads.
-            //      we need to exchange it with 0 first.
-            const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
-                0, std::memory_order_acq_rel);
-
-            if (free_list != 0)
+            if (0 != m_page_head.m_free_times.exchange(0, std::memory_order_acq_rel))
             {
+                // Make sure `m_page_head` store happend before load of `m_freed_unit_head_offset`.
+                // NOTE: m_freed_unit_head_offset might be modified by other threads.
+                //      we need to exchange it with 0 first.
+                const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
+                    0, std::memory_order_acq_rel);
+
+                assert(free_list != 0);
+
                 m_page_head.m_next_alloc_unit_head_offset = free_list;
-                goto _label_re_entry_for_reuse_free_list;
+                return true;
             }
-            return nullptr;
+            return false;
         }
         void free_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
         {
@@ -429,17 +434,17 @@ namespace woomem_cppimpl
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
                         std::memory_order_acquire);
-                do
-                {
-                    // Do nothing.
-                    std::this_thread::yield();
 
-                } while (
+                while (
                     !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
                         freeing_unit_head->m_next_alloc_unit_offset,
                         current_unit_offset,
                         std::memory_order_release,
-                        std::memory_order_acquire));
+                        std::memory_order_acquire))
+                {
+                    // Do nothing.
+                    std::this_thread::yield();
+                }
 
                 // Count for page reuses.
                 // NOTE: Use release order to make sure count operation always happend 
@@ -670,29 +675,65 @@ namespace woomem_cppimpl
         }
     };
 
-
-    
     struct GlobalPageCollection
     {
-        /*
-
-        */
-        struct FreedPageFIFOLockfree
-        {
-            atomic<Page*> m_next_free_page;
-        }
+        atomic<Page*> m_free_group_page_list[TOTAL_GROUP_COUNT];
 
         /* OPTIONAL */ Page* try_get_free_page(PageGroupType group_type) noexcept
         {
-            Chunk::allocate_new_page();
+            auto& group = m_free_group_page_list[group_type];
 
-            // TODO;
-            return nullptr;
+            auto* free_page = group.load(std::memory_order_relaxed);
+
+            if (free_page != nullptr)
+            {
+                while (!group.compare_exchange_weak(
+                    free_page,
+                    free_page->m_page_head.m_next_page,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+                {
+                    if (free_page == nullptr)
+                        break;
+                }
+            }
+
+            if (free_page == nullptr)
+            {
+                // Try allocate a new page from Chunk.
+                free_page = Chunk::allocate_new_page(group_type);
+            }
+
+            free_page->m_page_head.m_next_page = nullptr;
+            return free_page;
+        }
+        void return_free_page(Page* freeing_page) noexcept
+        {
+            auto& group = m_free_group_page_list[freeing_page->m_page_head.m_page_belong_to_group];
+
+            freeing_page->m_page_head.m_next_page =
+                group.load(std::memory_order_relaxed);
+
+            while (!group.compare_exchange_weak(
+                freeing_page->m_page_head.m_next_page,
+                freeing_page,
+                std::memory_order_release,
+                std::memory_order_relaxed))
+            {
+                std::this_thread::yield();
+            }
         }
     };
+    GlobalPageCollection g_global_page_collection;
 
+    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
     struct ThreadLocalPageCollection
     {
+        /*
+        m_alloc_timing 用于缓存线程局部的 GC 轮次，每次线程检查点时更新此值。
+        */
+        uint8_t m_alloc_timing;
+
         /*
         内存分配策略：
         ThreadLocalPageCollection 针对每一个分配组都缓存若干个 Page；如果某次分配中，页面报告其自身简单耗尽，
@@ -702,10 +743,118 @@ namespace woomem_cppimpl
         对于耗尽的分配组，ThreadLocalPageCollection 从 GlobalPageCollection 重新提取若干个空闲页面作为新的分配组
         旧的分配组将被继续缓存在 ThreadLocalPageCollection 中，
         */
-        struct ActivePageFIFO
+        Page* m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+
+        void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
         {
-            PageHead* 
-        };
+            const auto alloc_group = get_page_group_type_for_size(unit_size);
+            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+            {
+                auto*& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+                auto* const unit = current_alloc_group->try_allocate_unit_from_page();
+                if (WOOMEM_LIKELY(unit != nullptr))
+                {
+                    // Init unit attribute.
+                    unit->m_alloc_timing =
+                        m_alloc_timing & static_cast<uint8_t>(0b01111u);
+                    unit->m_gc_type =
+                        static_cast<uint8_t>(unit_type);
+
+                    // Unit allocated.
+                    unit->m_allocated_status.store(1, std::memory_order_release);
+
+                    return unit + 1;
+                }
+                else
+                {
+                    // Page run out, try next page in this group.
+                    auto* const next_page =
+                        current_alloc_group->m_page_head.m_next_page;
+
+                    if (WOOMEM_LIKELY(next_page->try_tidy_page()))
+                    {
+                        current_alloc_group = next_page;
+                        return current_alloc_group->try_allocate_unit_from_page();
+                    }
+
+                    // This page run out, drop it and try get new pages from global pool.
+                    auto* const new_page =
+                        g_global_page_collection.try_get_free_page(alloc_group);
+
+                    if (WOOMEM_LIKELY(new_page != nullptr))
+                    {
+                        // Got a new page from global pool.
+                        current_alloc_group->m_page_head.m_next_page = new_page;
+                        new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
+
+                        next_page->m_page_head.m_abondon_page_flag.store(
+                            1, std::memory_order_release);
+
+                        current_alloc_group = new_page;
+                        return current_alloc_group->try_allocate_unit_from_page();
+                    }
+
+                    // We have tried all method to get new unit, alloc failed...
+                    return nullptr;
+                }
+            }
+            else
+            {
+                // TODO: Large alloc
+                abort();
+            }
+        }
+
+        ThreadLocalPageCollection() noexcept
+            : m_alloc_timing{ 0 }
+        {
+            for (PageGroupType t = PageGroupType::SMALL_8;
+                t < PageGroupType::LARGE;
+                t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
+            {
+                Page* reserved_pages[THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
+
+                for (Page*& page : reserved_pages)
+                {
+                    page = g_global_page_collection.try_get_free_page(t);
+                    if (WOOMEM_UNLIKELY(page == nullptr))
+                    {
+                        // Oh... wtf...
+
+                        // TODO: Solve this problem later.
+                        abort();
+                    }
+                }
+
+                for (size_t i = 0; i < THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP; ++i)
+                {
+                    reserved_pages[i]->m_page_head.m_next_page =
+                        reserved_pages[(i + 1) % THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
+                }
+            }
+        }
+        ~ThreadLocalPageCollection()
+        {
+            for (PageGroupType t = PageGroupType::SMALL_8;
+                t < PageGroupType::LARGE;
+                t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
+            {
+                Page* const first_freeing_page = m_current_allocating_page_for_group[t];
+                Page* freeing_page = first_freeing_page;
+                do
+                {
+                    Page* const next_page = freeing_page->m_page_head.m_next_page;
+                    g_global_page_collection.return_free_page(freeing_page);
+                    freeing_page = next_page;
+
+                } while (freeing_page != first_freeing_page);
+            }
+        }
+
+        ThreadLocalPageCollection(const ThreadLocalPageCollection&) = delete;
+        ThreadLocalPageCollection(ThreadLocalPageCollection&&) = delete;
+        ThreadLocalPageCollection& operator=(const ThreadLocalPageCollection&) = delete;
+        ThreadLocalPageCollection& operator=(ThreadLocalPageCollection&&) = delete;
     };
 
     // Will be inited in `woomem_init`
