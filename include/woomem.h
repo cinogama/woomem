@@ -90,7 +90,7 @@ extern "C" {
     解分配给定的指针，该指针必须是合法的，与 woomem_try_mark_self 不同，分配器不会特地检
     查指定单元的合法性。
     */
-    /* OPTIONAL */ void woomem_free(void* ptr);
+    void woomem_free(void* ptr);
 
     /*
     GC接口，外部的GC实现通过此接口尝试检查和初步标记一个可能的地址，如果：

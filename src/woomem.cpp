@@ -247,7 +247,7 @@ namespace woomem_cppimpl
                 MIDIUM_1440, MIDIUM_2168, MIDIUM_3104, MIDIUM_4352, MIDIUM_6536,
                 MIDIUM_9344, MIDIUM_13088, MIDIUM_21824, MIDIUM_32744, MIDIUM_65504
             };
-            
+
             // 二分查找
             int lo = 0, hi = 9;
             while (lo < hi) {
@@ -292,17 +292,36 @@ namespace woomem_cppimpl
     struct UnitHead
     {
         /* Used for user free. */
-        Page* m_parent_page;
+        Page*           m_parent_page;
 
         atomic_uint8_t  m_allocated_status; // 0 = freed, 1 = allocated
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-            m_gc_type : 4;
+                        m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
         uint16_t m_next_alloc_unit_offset;
+
+        WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
+        {
+            uint8_t expected_status = 1;
+            if (WOOMEM_LIKELY(
+                m_allocated_status.compare_exchange_strong(
+                    expected_status,
+                    0,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed)))
+            {
+                m_gc_age = NEW_BORN_GC_AGE;
+                m_gc_marked.store(
+                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+
+                return true;
+            }
+            return false;
+        }
     };
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
@@ -414,13 +433,7 @@ namespace woomem_cppimpl
             assert(freeing_unit_head->m_parent_page == this);
             assert(0 != freeing_unit_head->m_allocated_status.load(std::memory_order_relaxed));
 
-            uint8_t expected_status = 1;
-            if (WOOMEM_LIKELY(
-                freeing_unit_head->m_allocated_status.compare_exchange_strong(
-                    expected_status,
-                    0,
-                    std::memory_order_relaxed,
-                    std::memory_order_relaxed)))
+            if (freeing_unit_head->try_free_this_unit_head())
             {
                 // Ok, this unit is freed by current thread now
                 const uint16_t current_unit_offset =
@@ -430,17 +443,10 @@ namespace woomem_cppimpl
 
                 assert(current_unit_offset % 8 == 0);
 
-                // Reset GC attribute, avoid set them in allocation path.
-                freeing_unit_head->m_gc_age = NEW_BORN_GC_AGE;
-                freeing_unit_head->m_gc_marked.store(
-                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
-
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
                         std::memory_order_relaxed);
-                
-                // 使用指数退避策略减少高竞争下的性能损失
-                int spin_count = 0;
+
                 while (
                     !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
                         freeing_unit_head->m_next_alloc_unit_offset,
@@ -448,23 +454,14 @@ namespace woomem_cppimpl
                         std::memory_order_release,
                         std::memory_order_relaxed))
                 {
-                    // 指数退避：多次 pause
-                    for (int i = 0; i < (1 << spin_count); ++i)
-                        WOOMEM_PAUSE();
-                    if (spin_count < 4) ++spin_count;
+                    WOOMEM_PAUSE();
                 }
-
-                assert(freeing_unit_head->m_next_alloc_unit_offset % 8 == 0);
 
                 // Count for page reuses.
                 // NOTE: Use release order to make sure count operation always happend 
                 //      after the free operation.
                 (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
-
-                return;
-            }
-            // Else: this unit might be freed by GC, or double free detected.
-            assert(expected_status == 0);
+            }        
         }
 
         static void free_page_unit_asyncly(void* valid_page_unit)
@@ -654,7 +651,6 @@ namespace woomem_cppimpl
                 std::memory_order_release,
                 std::memory_order_acquire))
             {
-                // 使用轻量级 pause 指令
                 WOOMEM_PAUSE();
             }
             return new_chunk;
@@ -750,7 +746,7 @@ namespace woomem_cppimpl
     GlobalPageCollection g_global_page_collection;
 
     constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
-    
+
     struct ThreadLocalPageCollection
     {
         /*
@@ -767,38 +763,64 @@ namespace woomem_cppimpl
         对于耗尽的分配组，ThreadLocalPageCollection 从 GlobalPageCollection 重新提取若干个空闲页面作为新的分配组
         旧的分配组将被继续缓存在 ThreadLocalPageCollection 中，
         */
-        Page* m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+        struct AllocFreeGroup
+        {
+            Page* m_allocating_page;
+
+            UnitHead* m_free_unit_head;
+            size_t m_free_unit_count;
+        };
+        AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+
+        WOOMEM_FORCE_INLINE void* init_allocaed_head(
+            UnitHead* unit_head, woomem_GCUnitType unit_type) noexcept
+        {
+            // Init unit attribute before m_allocated_status is set to 1.
+            unit_head->m_alloc_timing =
+                m_alloc_timing & static_cast<uint8_t>(0b01111u);
+            unit_head->m_gc_type =
+                static_cast<uint8_t>(unit_type);
+
+            // Unit allocated.
+            unit_head->m_allocated_status.store(1, std::memory_order_release);
+            return unit_head + 1;
+        }
 
         void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
             if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
             {
-                auto*& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+                auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+
+                if (current_alloc_group.m_free_unit_count > 0)
+                {
+                    // Pop last free unit.
+                    auto* const tls_free_unit_head = current_alloc_group.m_free_unit_head;
+                    current_alloc_group.m_free_unit_head =
+                        *reinterpret_cast<UnitHead**>(
+                            reinterpret_cast<char*>(tls_free_unit_head) + sizeof(UnitHead));
+                    --current_alloc_group.m_free_unit_count;
+
+                    return init_allocaed_head(tls_free_unit_head, unit_type);
+                }
+
+                auto*& current_alloc_page = current_alloc_group.m_allocating_page;
             _lable_alloc_successfully:
-                auto* const unit = current_alloc_group->try_allocate_unit_from_page();
+                auto* const unit = current_alloc_page->try_allocate_unit_from_page();
                 if (WOOMEM_LIKELY(unit != nullptr))
                 {
-                    // Init unit attribute before m_allocated_status is set to 1.
-                    unit->m_alloc_timing =
-                        m_alloc_timing & static_cast<uint8_t>(0b01111u);
-                    unit->m_gc_type =
-                        static_cast<uint8_t>(unit_type);
-
-                    // Unit allocated.
-                    unit->m_allocated_status.store(1, std::memory_order_release);
-
-                    return unit + 1;
+                    return init_allocaed_head(unit, unit_type);
                 }
                 else
                 {
                     // Page run out, try next page in this group.
                     auto* const next_page =
-                        current_alloc_group->m_page_head.m_next_page;
+                        current_alloc_page->m_page_head.m_next_page;
 
                     if (WOOMEM_LIKELY(next_page->try_tidy_page()))
                     {
-                        current_alloc_group = next_page;
+                        current_alloc_page = next_page;
                         goto _lable_alloc_successfully;
                     }
 
@@ -809,13 +831,13 @@ namespace woomem_cppimpl
                     if (WOOMEM_LIKELY(new_page != nullptr))
                     {
                         // Got a new page from global pool.
-                        current_alloc_group->m_page_head.m_next_page = new_page;
+                        current_alloc_page->m_page_head.m_next_page = new_page;
                         new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
 
                         next_page->m_page_head.m_abondon_page_flag.store(
                             1, std::memory_order_release);
 
-                        current_alloc_group = new_page;
+                        current_alloc_page = new_page;
                         goto _lable_alloc_successfully;
                     }
 
@@ -827,6 +849,25 @@ namespace woomem_cppimpl
             {
                 // TODO: Large alloc
                 abort();
+            }
+        }
+        void free(void* unit)
+        {
+            UnitHead* const freeing_unit_head =
+                reinterpret_cast<UnitHead*>(
+                    reinterpret_cast<char*>(unit) - sizeof(UnitHead));
+
+            auto& group = m_current_allocating_page_for_group[
+                freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group];
+
+            if (freeing_unit_head->try_free_this_unit_head())
+            {
+                // This unit is freed by current thread.
+
+                *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
+                group.m_free_unit_head = freeing_unit_head;
+
+                ++group.m_free_unit_count;
             }
         }
 
@@ -857,7 +898,10 @@ namespace woomem_cppimpl
                         reserved_pages[(i + 1) % THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
                 }
 
-                m_current_allocating_page_for_group[t] = reserved_pages[0];
+                auto& group = m_current_allocating_page_for_group[t];
+                group.m_allocating_page = reserved_pages[0];
+                group.m_free_unit_head = nullptr;
+                group.m_free_unit_count = 0;
             }
         }
         ~ThreadLocalPageCollection()
@@ -872,7 +916,7 @@ namespace woomem_cppimpl
                 t < PageGroupType::LARGE;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
-                Page* const first_freeing_page = m_current_allocating_page_for_group[t];
+                Page* const first_freeing_page = m_current_allocating_page_for_group[t].m_allocating_page;
                 Page* freeing_page = first_freeing_page;
                 do
                 {
@@ -932,7 +976,7 @@ void woomem_shutdown(void)
     return t_tls_page_collection.alloc(size, WOOMEM_GC_UNIT_TYPE_IS_GCUNIT);
 }
 
-/* OPTIONAL */ void woomem_free(void* ptr)
+void woomem_free(void* ptr)
 {
-    Page::free_page_unit_asyncly(ptr);
+    t_tls_page_collection.free(ptr);
 }
