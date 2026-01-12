@@ -276,10 +276,6 @@ void bench_random_sizes(void)
     // woomem
     timer_start(&t);
     for (int i = 0; i < ITERATIONS; ++i) {
-
-        if (i == 5140)
-            printf("");
-
         void* p = woomem_alloc_normal(sizes[i]);
         use_pointer(p);
         woomem_free(p);

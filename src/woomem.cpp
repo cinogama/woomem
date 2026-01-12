@@ -306,15 +306,8 @@ namespace woomem_cppimpl
 
     union Page
     {
+        PageHead m_page_head;
         char m_entries[PAGE_SIZE];
-
-        struct
-        {
-            PageHead m_page_head;
-
-            // Followed by many UnitHead + User Data.
-            char m_storage[PAGE_SIZE - sizeof(PageHead)];
-        };
 
         void reinit_page_with_group(PageGroupType group_type) noexcept
         {
