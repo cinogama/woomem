@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <atomic>
 #include <new>
-#include <thread>
 #include <vector>
 #include <algorithm>
 
@@ -17,15 +16,19 @@ using namespace std;
 #   define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
 #   define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
 #   define WOOMEM_FORCE_INLINE    __attribute__((always_inline)) inline
+#   define WOOMEM_PAUSE()         __builtin_ia32_pause()
 #elif defined(_MSC_VER)
+#   include <intrin.h>
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
 #   define WOOMEM_FORCE_INLINE    __forceinline
+#   define WOOMEM_PAUSE()         _mm_pause()
 #else
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
 #   define WOOMEM_ALWAYS_INLINE   inline
 #   define WOOMEM_NOINLINE
+#   define WOOMEM_PAUSE()         ((void)0)
 #endif
 
 namespace woomem_cppimpl
@@ -235,26 +238,26 @@ namespace woomem_cppimpl
         }
         else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_65504])
         {
-            if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_1440])
-                return MIDIUM_1440;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_2168])
-                return MIDIUM_2168;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_3104])
-                return MIDIUM_3104;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_4352])
-                return MIDIUM_4352;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_6536])
-                return MIDIUM_6536;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_9344])
-                return MIDIUM_9344;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_13088])
-                return MIDIUM_13088;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_21824])
-                return MIDIUM_21824;
-            else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_32744])
-                return MIDIUM_32744;
-            else /* size <= 65504 */
-                return MIDIUM_65504;
+            // 使用二分查找优化中等大小的分配
+            // 中等大小范围: MIDIUM_1440 到 MIDIUM_65504
+            constexpr size_t MIDIUM_SIZES[] = {
+                1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 32744, 65504
+            };
+            constexpr PageGroupType MIDIUM_GROUPS[] = {
+                MIDIUM_1440, MIDIUM_2168, MIDIUM_3104, MIDIUM_4352, MIDIUM_6536,
+                MIDIUM_9344, MIDIUM_13088, MIDIUM_21824, MIDIUM_32744, MIDIUM_65504
+            };
+            
+            // 二分查找
+            int lo = 0, hi = 9;
+            while (lo < hi) {
+                int mid = (lo + hi) >> 1;
+                if (MIDIUM_SIZES[mid] < size)
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            return MIDIUM_GROUPS[lo];
         }
         else
         {
@@ -434,16 +437,21 @@ namespace woomem_cppimpl
 
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
-                        std::memory_order_acquire);
+                        std::memory_order_relaxed);
+                
+                // 使用指数退避策略减少高竞争下的性能损失
+                int spin_count = 0;
                 while (
                     !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
                         freeing_unit_head->m_next_alloc_unit_offset,
                         current_unit_offset,
                         std::memory_order_release,
-                        std::memory_order_acquire))
+                        std::memory_order_relaxed))
                 {
-                    // Do nothing.
-                    std::this_thread::yield();
+                    // 指数退避：多次 pause
+                    for (int i = 0; i < (1 << spin_count); ++i)
+                        WOOMEM_PAUSE();
+                    if (spin_count < 4) ++spin_count;
                 }
 
                 assert(freeing_unit_head->m_next_alloc_unit_offset % 8 == 0);
@@ -646,8 +654,8 @@ namespace woomem_cppimpl
                 std::memory_order_release,
                 std::memory_order_acquire))
             {
-                // Retry updating last chunk.
-                std::this_thread::yield();
+                // 使用轻量级 pause 指令
+                WOOMEM_PAUSE();
             }
             return new_chunk;
         }
@@ -700,30 +708,26 @@ namespace woomem_cppimpl
         {
             auto& group = m_free_group_page_list[group_type];
 
-            auto* free_page = group.load(std::memory_order_relaxed);
+            auto* free_page = group.load(std::memory_order_acquire);
 
-            if (free_page != nullptr)
+            while (free_page != nullptr)
             {
-                while (!group.compare_exchange_weak(
+                if (group.compare_exchange_weak(
                     free_page,
                     free_page->m_page_head.m_next_page,
-                    std::memory_order_release,
-                    std::memory_order_relaxed))
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
                 {
-                    if (free_page == nullptr)
-                        break;
+                    // Successfully got the page
+                    free_page->m_page_head.m_next_page = nullptr;
+                    return free_page;
                 }
+                // CAS failed, free_page is updated to current value, retry
+                WOOMEM_PAUSE();
             }
 
-            if (free_page == nullptr)
-            {
-                // Try allocate a new page from Chunk.
-                // NOTE: `m_next_page` has been set to nullptr in allocate_new_page.
-                return Chunk::allocate_new_page(group_type);
-            }
-
-            free_page->m_page_head.m_next_page = nullptr;
-            return free_page;
+            // No free page in pool, allocate a new one from Chunk
+            return Chunk::allocate_new_page(group_type);
         }
         void return_free_page(Page* freeing_page) noexcept
         {
@@ -739,13 +743,14 @@ namespace woomem_cppimpl
                 std::memory_order_release,
                 std::memory_order_relaxed))
             {
-                std::this_thread::yield();
+                WOOMEM_PAUSE();
             }
         }
     };
     GlobalPageCollection g_global_page_collection;
 
     constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
+    
     struct ThreadLocalPageCollection
     {
         /*
