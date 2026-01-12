@@ -806,7 +806,7 @@ namespace woomem_cppimpl
                 }
 
                 auto*& current_alloc_page = current_alloc_group.m_allocating_page;
-            _lable_alloc_successfully:
+            _label_get_new_group_page_successfully:
                 auto* const unit = current_alloc_page->try_allocate_unit_from_page();
                 if (WOOMEM_LIKELY(unit != nullptr))
                 {
@@ -821,7 +821,7 @@ namespace woomem_cppimpl
                     if (WOOMEM_LIKELY(next_page->try_tidy_page()))
                     {
                         current_alloc_page = next_page;
-                        goto _lable_alloc_successfully;
+                        goto _label_get_new_group_page_successfully;
                     }
 
                     // This page run out, drop it and try get new pages from global pool.
@@ -838,7 +838,7 @@ namespace woomem_cppimpl
                             1, std::memory_order_release);
 
                         current_alloc_page = new_page;
-                        goto _lable_alloc_successfully;
+                        goto _label_get_new_group_page_successfully;
                     }
 
                     // We have tried all method to get new unit, alloc failed...
