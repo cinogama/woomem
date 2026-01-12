@@ -321,6 +321,7 @@ namespace woomem_cppimpl
             // Only empty and new page can be reinit.
             assert(group_type != PageGroupType::LARGE);
 
+            m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
             m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
             m_page_head.m_free_times.store(0, std::memory_order_relaxed);
@@ -332,15 +333,15 @@ namespace woomem_cppimpl
             uint16_t* next_unit_offset_ptr =
                 &m_page_head.m_next_alloc_unit_head_offset;
 
-            for (uint16_t current_unit_head_begin = sizeof(PageHead);
-                static_cast<size_t>(current_unit_head_begin) + unit_take_size_unit <= PAGE_SIZE;
-                current_unit_head_begin += static_cast<uint16_t>(unit_take_size_unit))
+            for (size_t current_unit_head_begin = sizeof(PageHead);
+                current_unit_head_begin + unit_take_size_unit <= PAGE_SIZE;
+                current_unit_head_begin += unit_take_size_unit)
             {
-                *next_unit_offset_ptr = current_unit_head_begin;
+                *next_unit_offset_ptr = static_cast<uint16_t>(current_unit_head_begin);
 
                 // Init unit head here.
                 UnitHead* unit_head =
-                    reinterpret_cast<UnitHead*>(&m_storage[current_unit_head_begin]);
+                    reinterpret_cast<UnitHead*>(&m_entries[current_unit_head_begin]);
 
                 unit_head->m_parent_page = this;
                 unit_head->m_allocated_status.store(0, std::memory_order_relaxed);
@@ -365,7 +366,6 @@ namespace woomem_cppimpl
 
             if (WOOMEM_LIKELY(next_alloc_unit_head_offset))
             {
-            _label_re_entry_for_reuse_free_list:
                 UnitHead* const allocating_unit_head =
                     reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
 
@@ -376,18 +376,24 @@ namespace woomem_cppimpl
                 ATTENTION: Attribute and allocated flag will be set after
                         this function returns.
                 */
-
                 m_page_head.m_next_alloc_unit_head_offset =
                     allocating_unit_head->m_next_alloc_unit_offset;
 
+                assert(m_page_head.m_next_alloc_unit_head_offset % 8 == 0);
+
                 return allocating_unit_head;
             }
-
             return nullptr;
         }
+
+        /*
+        ATTENTION: This page must belong current thread's TlsPageCollection.
+        */
         bool try_tidy_page() noexcept
         {
-            assert(m_page_head.m_next_alloc_unit_head_offset == 0);
+            if (m_page_head.m_next_alloc_unit_head_offset != 0)
+                // Still have unit to alloc.
+                return true;
 
             // Reset free times count.
             // NOTE: m_free_times must happend before m_freed_unit_head_offset.
@@ -426,6 +432,8 @@ namespace woomem_cppimpl
                         reinterpret_cast<char*>(freeing_unit_head) -
                         m_entries);
 
+                assert(current_unit_offset % 8 == 0);
+
                 // Reset GC attribute, avoid set them in allocation path.
                 freeing_unit_head->m_gc_age = NEW_BORN_GC_AGE;
                 freeing_unit_head->m_gc_marked.store(
@@ -434,7 +442,6 @@ namespace woomem_cppimpl
                 freeing_unit_head->m_next_alloc_unit_offset =
                     m_page_head.m_freed_unit_head_offset.load(
                         std::memory_order_acquire);
-
                 while (
                     !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
                         freeing_unit_head->m_next_alloc_unit_offset,
@@ -446,10 +453,14 @@ namespace woomem_cppimpl
                     std::this_thread::yield();
                 }
 
+                assert(freeing_unit_head->m_next_alloc_unit_offset % 8 == 0);
+
                 // Count for page reuses.
                 // NOTE: Use release order to make sure count operation always happend 
                 //      after the free operation.
                 (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
+
+                return;
             }
             // Else: this unit might be freed by GC, or double free detected.
             assert(expected_status == 0);
@@ -615,6 +626,39 @@ namespace woomem_cppimpl
             }
         }
 
+        static /* OPTIONAL */ Chunk* create_new_chunk()
+        {
+            // Need to allocate a new chunk.
+            void* chunk_storage = malloc(sizeof(Chunk));
+            if (WOOMEM_UNLIKELY(chunk_storage == nullptr))
+            {
+                // No more memory !!!
+                return nullptr;
+            }
+
+            void* reserved_address = woomem_os_reserve_memory(CHUNK_SIZE);
+            if (WOOMEM_UNLIKELY(reserved_address == nullptr))
+            {
+                // Cannot reserve virtual address for new chunk.
+                free(chunk_storage);
+                return nullptr;
+            }
+
+            Chunk* new_chunk = new (chunk_storage) Chunk(reserved_address);
+            new_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_acquire);
+
+            while (!g_current_chunk.compare_exchange_weak(
+                new_chunk->m_last_chunk,
+                new_chunk,
+                std::memory_order_release,
+                std::memory_order_acquire))
+            {
+                // Retry updating last chunk.
+                std::this_thread::yield();
+            }
+            return new_chunk;
+        }
+
         static /* OPTIONAL */ Page* allocate_new_page(PageGroupType page_group)
         {
             Chunk* current_chunk =
@@ -622,51 +666,31 @@ namespace woomem_cppimpl
 
             do
             {
-                bool page_run_out;
-                Page* new_page = current_chunk->allocate_new_page_in_chunk(page_group, &page_run_out);
-
-                if (WOOMEM_UNLIKELY(page_run_out))
+                if (WOOMEM_LIKELY(current_chunk != nullptr))
                 {
-                    // Check last chunk?
-                    current_chunk = current_chunk->m_last_chunk;
+                    bool page_run_out;
+                    Page* new_page = current_chunk->allocate_new_page_in_chunk(
+                        page_group, &page_run_out);
 
-                    if (WOOMEM_LIKELY(current_chunk != nullptr))
-                        // Continue to try last chunk.
+                    if (WOOMEM_UNLIKELY(page_run_out))
+                    {
+                        // Check last chunk?
+                        current_chunk = current_chunk->m_last_chunk;
+                        continue;
+                    }
+
+                    // new_page might be nullptr if commit memory failed.
+                    return new_page;
+                }
+                else
+                {
+                    current_chunk = create_new_chunk();
+                    if (WOOMEM_LIKELY(current_chunk))
                         continue;
 
-                    // Need to allocate a new chunk.
-                    void* chunk_storage = malloc(sizeof(Chunk));
-                    if (WOOMEM_UNLIKELY(chunk_storage == nullptr))
-                    {
-                        // No more memory !!!
-                        return nullptr;
-                    }
-
-                    void* reserved_address = woomem_os_reserve_memory(CHUNK_SIZE);
-                    if (WOOMEM_UNLIKELY(reserved_address == nullptr))
-                    {
-                        // Cannot reserve virtual address for new chunk.
-                        free(chunk_storage);
-                        return nullptr;
-                    }
-
-                    current_chunk = new (chunk_storage) Chunk(reserved_address);
-                    current_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_acquire);
-
-                    while (!g_current_chunk.compare_exchange_weak(
-                        current_chunk->m_last_chunk,
-                        current_chunk,
-                        std::memory_order_release,
-                        std::memory_order_acquire))
-                    {
-                        // Retry updating last chunk.
-                        std::this_thread::yield();
-                    }
-                    continue;
+                    // Failed to alloc chunk..
+                    return nullptr;
                 }
-
-                // new_page might be nullptr if commit memory failed.
-                return new_page;
 
             } while (true);
 
@@ -701,7 +725,8 @@ namespace woomem_cppimpl
             if (free_page == nullptr)
             {
                 // Try allocate a new page from Chunk.
-                free_page = Chunk::allocate_new_page(group_type);
+                // NOTE: `m_next_page` has been set to nullptr in allocate_new_page.
+                return Chunk::allocate_new_page(group_type);
             }
 
             free_page->m_page_head.m_next_page = nullptr;
@@ -709,7 +734,8 @@ namespace woomem_cppimpl
         }
         void return_free_page(Page* freeing_page) noexcept
         {
-            auto& group = m_free_group_page_list[freeing_page->m_page_head.m_page_belong_to_group];
+            auto& group = m_free_group_page_list[
+                freeing_page->m_page_head.m_page_belong_to_group];
 
             freeing_page->m_page_head.m_next_page =
                 group.load(std::memory_order_relaxed);
@@ -751,10 +777,11 @@ namespace woomem_cppimpl
             if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
             {
                 auto*& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+            _lable_alloc_successfully:
                 auto* const unit = current_alloc_group->try_allocate_unit_from_page();
                 if (WOOMEM_LIKELY(unit != nullptr))
                 {
-                    // Init unit attribute.
+                    // Init unit attribute before m_allocated_status is set to 1.
                     unit->m_alloc_timing =
                         m_alloc_timing & static_cast<uint8_t>(0b01111u);
                     unit->m_gc_type =
@@ -774,7 +801,7 @@ namespace woomem_cppimpl
                     if (WOOMEM_LIKELY(next_page->try_tidy_page()))
                     {
                         current_alloc_group = next_page;
-                        return current_alloc_group->try_allocate_unit_from_page();
+                        goto _lable_alloc_successfully;
                     }
 
                     // This page run out, drop it and try get new pages from global pool.
@@ -791,7 +818,7 @@ namespace woomem_cppimpl
                             1, std::memory_order_release);
 
                         current_alloc_group = new_page;
-                        return current_alloc_group->try_allocate_unit_from_page();
+                        goto _lable_alloc_successfully;
                     }
 
                     // We have tried all method to get new unit, alloc failed...
@@ -831,10 +858,18 @@ namespace woomem_cppimpl
                     reserved_pages[i]->m_page_head.m_next_page =
                         reserved_pages[(i + 1) % THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
                 }
+
+                m_current_allocating_page_for_group[t] = reserved_pages[0];
             }
         }
         ~ThreadLocalPageCollection()
         {
+            if (Chunk::g_current_chunk.load(std::memory_order_acquire) == nullptr)
+            {
+                // Already shutdown.
+                return;
+            }
+
             for (PageGroupType t = PageGroupType::SMALL_8;
                 t < PageGroupType::LARGE;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
@@ -856,7 +891,50 @@ namespace woomem_cppimpl
         ThreadLocalPageCollection& operator=(const ThreadLocalPageCollection&) = delete;
         ThreadLocalPageCollection& operator=(ThreadLocalPageCollection&&) = delete;
     };
+    thread_local ThreadLocalPageCollection t_tls_page_collection;
 
-    // Will be inited in `woomem_init`
     atomic<Chunk*> Chunk::g_current_chunk;
+}
+
+using namespace woomem_cppimpl;
+
+void woomem_init(void)
+{
+}
+void woomem_shutdown(void)
+{
+    Chunk* current_chunk =
+        Chunk::g_current_chunk.load(std::memory_order_acquire);
+
+    while (current_chunk != nullptr)
+    {
+        Chunk* last_chunk = current_chunk->m_last_chunk;
+
+        current_chunk->~Chunk();
+        free(current_chunk);
+
+        current_chunk = last_chunk;
+    }
+
+    Chunk::g_current_chunk.store(
+        nullptr,
+        std::memory_order_release);
+}
+
+/* OPTIONAL */ void* woomem_alloc_normal(size_t size)
+{
+    return t_tls_page_collection.alloc(size, WOOMEM_GC_UNIT_TYPE_NORMAL);
+}
+/* OPTIONAL */ void* woomem_alloc_auto_mark(size_t size)
+{
+    return t_tls_page_collection.alloc(size, WOOMEM_GC_UNIT_TYPE_AUTO_MARK);
+}
+/* OPTIONAL */ void* woomem_alloc_gcunit(size_t size)
+{
+    return t_tls_page_collection.alloc(size, WOOMEM_GC_UNIT_TYPE_IS_GCUNIT);
+}
+
+/* OPTIONAL */ void woomem_free(void* ptr)
+{
+    Page::free_page_unit_asyncly(ptr);
 }

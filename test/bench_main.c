@@ -93,7 +93,7 @@ void bench_sequential_alloc_free(void)
         // woomem
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
-            void* p = woomem_alloc(SMALL_SIZE);
+            void* p = woomem_alloc_normal(SMALL_SIZE);
             use_pointer(p);
             woomem_free(p);
         }
@@ -120,7 +120,7 @@ void bench_sequential_alloc_free(void)
         // woomem
         timer_start(&t);
         for (int i = 0; i < ITERATIONS; ++i) {
-            void* p = woomem_alloc(MEDIUM_SIZE);
+            void* p = woomem_alloc_normal(MEDIUM_SIZE);
             use_pointer(p);
             woomem_free(p);
         }
@@ -148,7 +148,7 @@ void bench_sequential_alloc_free(void)
         // woomem
         timer_start(&t);
         for (int i = 0; i < large_iterations; ++i) {
-            void* p = woomem_alloc(LARGE_SIZE);
+            void* p = woomem_alloc_normal(LARGE_SIZE);
             use_pointer(p);
             woomem_free(p);
         }
@@ -192,7 +192,7 @@ void bench_batch_alloc_free(void)
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
             for (int i = 0; i < BATCH_SIZE; ++i) {
-                ptrs[i] = woomem_alloc(SMALL_SIZE);
+                ptrs[i] = woomem_alloc_normal(SMALL_SIZE);
             }
             for (int i = 0; i < BATCH_SIZE; ++i) {
                 woomem_free(ptrs[i]);
@@ -225,7 +225,7 @@ void bench_batch_alloc_free(void)
         timer_start(&t);
         for (int b = 0; b < batches; ++b) {
             for (int i = 0; i < BATCH_SIZE; ++i) {
-                ptrs[i] = woomem_alloc(MEDIUM_SIZE);
+                ptrs[i] = woomem_alloc_normal(MEDIUM_SIZE);
             }
             for (int i = 0; i < BATCH_SIZE; ++i) {
                 woomem_free(ptrs[i]);
@@ -276,7 +276,11 @@ void bench_random_sizes(void)
     // woomem
     timer_start(&t);
     for (int i = 0; i < ITERATIONS; ++i) {
-        void* p = woomem_alloc(sizes[i]);
+
+        if (i == 5140)
+            printf("");
+
+        void* p = woomem_alloc_normal(sizes[i]);
         use_pointer(p);
         woomem_free(p);
     }
@@ -330,7 +334,7 @@ void bench_mixed_pattern(void)
         if (ops[i] == 0 || pool_count == 0) {
             // Alloc
             if (pool_count < BATCH_SIZE) {
-                pool[pool_count++] = woomem_alloc(sizes[i]);
+                pool[pool_count++] = woomem_alloc_normal(sizes[i]);
             }
         }
         else {
@@ -399,7 +403,7 @@ DWORD WINAPI thread_bench_woomem(LPVOID arg) {
 
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
-        void* p = woomem_alloc(SMALL_SIZE);
+        void* p = woomem_alloc_normal(SMALL_SIZE);
         use_pointer(p);
         woomem_free(p);
     }
@@ -489,7 +493,7 @@ void* thread_bench_woomem_posix(void* arg) {
 
     timer_start(&t);
     for (int i = 0; i < data->iterations; ++i) {
-        void* p = woomem_alloc(SMALL_SIZE);
+        void* p = woomem_alloc_normal(SMALL_SIZE);
         use_pointer(p);
         woomem_free(p);
     }
@@ -577,7 +581,7 @@ int main(int argc, char** argv)
     // 预热
     printf("\nWarming up...\n");
     for (int i = 0; i < 10000; ++i) {
-        void* p = woomem_alloc(64);
+        void* p = woomem_alloc_normal(64);
         woomem_free(p);
         p = malloc(64);
         free(p);
