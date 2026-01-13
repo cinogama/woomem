@@ -778,61 +778,52 @@ namespace woomem_cppimpl
         };
         AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
 
-        WOOMEM_FORCE_INLINE void* init_allocaed_head(
-            UnitHead* unit_head, woomem_GCUnitType unit_type) noexcept
-        {
-            // Init unit attribute before m_allocated_status is set to 1.
-            unit_head->m_alloc_timing =
-                m_alloc_timing & static_cast<uint8_t>(0b01111u);
-            unit_head->m_gc_type =
-                static_cast<uint8_t>(unit_type);
-
-            // Unit allocated.
-            unit_head->m_allocated_status.store(1, std::memory_order_release);
-            return unit_head + 1;
-        }
-
         void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
-            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+
+            if (WOOMEM_UNLIKELY(alloc_group == PageGroupType::LARGE))
             {
-                auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+                // TODO: Large alloc
+                abort();
+            }
 
-                if (current_alloc_group.m_free_unit_count > 0)
-                {
-                    // Pop last free unit.
-                    auto* const tls_free_unit_head = current_alloc_group.m_free_unit_head;
-                    current_alloc_group.m_free_unit_head =
-                        *reinterpret_cast<UnitHead**>(
-                            reinterpret_cast<char*>(tls_free_unit_head) + sizeof(UnitHead));
-                    --current_alloc_group.m_free_unit_count;
+            auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+            UnitHead* allocated_unit;
 
-                    return init_allocaed_head(tls_free_unit_head, unit_type);
-                }
-
+            // 1. Fast Path: Allocation from Free List
+            if (WOOMEM_LIKELY(current_alloc_group.m_free_unit_count > 0))
+            {
+                allocated_unit = current_alloc_group.m_free_unit_head;
+                
+                // Next free unit pointer is stored at the beginning of the user payload area.
+                current_alloc_group.m_free_unit_head = *reinterpret_cast<UnitHead**>(allocated_unit + 1);
+                --current_alloc_group.m_free_unit_count;
+            }
+            else
+            {
+                // 2. Slow Path: Allocation from Page
                 auto*& current_alloc_page = current_alloc_group.m_allocating_page;
-            _label_get_new_group_page_successfully:
-                auto* const unit = current_alloc_page->try_allocate_unit_from_page();
-                if (WOOMEM_LIKELY(unit != nullptr))
+
+                while (true)
                 {
-                    return init_allocaed_head(unit, unit_type);
-                }
-                else
-                {
+                    allocated_unit = current_alloc_page->try_allocate_unit_from_page();
+                    if (WOOMEM_LIKELY(allocated_unit != nullptr))
+                    {
+                        break;
+                    }
+
                     // Page run out, try next page in this group.
-                    auto* const next_page =
-                        current_alloc_page->m_page_head.m_next_page;
+                    auto* const next_page = current_alloc_page->m_page_head.m_next_page;
 
                     if (WOOMEM_LIKELY(next_page->try_tidy_page()))
                     {
                         current_alloc_page = next_page;
-                        goto _label_get_new_group_page_successfully;
+                        continue;
                     }
 
                     // This page run out, drop it and try get new pages from global pool.
-                    auto* const new_page =
-                        g_global_page_collection.try_get_free_page(alloc_group);
+                    auto* const new_page = g_global_page_collection.try_get_free_page(alloc_group);
 
                     if (WOOMEM_LIKELY(new_page != nullptr))
                     {
@@ -840,22 +831,25 @@ namespace woomem_cppimpl
                         current_alloc_page->m_page_head.m_next_page = new_page;
                         new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
 
-                        next_page->m_page_head.m_abondon_page_flag.store(
-                            1, std::memory_order_release);
+                        next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
 
                         current_alloc_page = new_page;
-                        goto _label_get_new_group_page_successfully;
+                        continue;
                     }
 
                     // We have tried all method to get new unit, alloc failed...
                     return nullptr;
                 }
             }
-            else
-            {
-                // TODO: Large alloc
-                abort();
-            }
+
+            // 3. Initialize Allocated Unit
+            // Init unit attribute before m_allocated_status is set to 1.
+            allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
+            allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
+
+            // Unit allocated.
+            allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+            return allocated_unit + 1;
         }
         void free(void* unit)
         {
