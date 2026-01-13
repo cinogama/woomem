@@ -17,20 +17,31 @@ using namespace std;
 #   define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
 #   define WOOMEM_FORCE_INLINE    __attribute__((always_inline)) inline
 #   define WOOMEM_NOINLINE        __attribute__((noinline))
-#   define WOOMEM_PAUSE()         __builtin_ia32_pause()
+#   if defined(__aarch64__) || defined(_M_ARM64)
+#       define WOOMEM_PAUSE()   __asm__ __volatile__("yield");
+#   elif defined(__x86_64__) || defined(_M_X64)
+#       define WOOMEM_PAUSE()   __asm__ __volatile__("pause");
+#   endif
 #elif defined(_MSC_VER)
 #   include <intrin.h>
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
 #   define WOOMEM_FORCE_INLINE    __forceinline
 #   define WOOMEM_NOINLINE        __declspec(noinline)
-#   define WOOMEM_PAUSE()         _mm_pause()
+#   if defined(_M_ARM64) || defined(__aarch64__)
+#       define WOOMEM_PAUSE()       __yield();
+#   elif defined(_M_X64) || defined(__x86_64__)
+#       define WOOMEM_PAUSE()       _mm_pause();
+#   endif
 #else
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
 #   define WOOMEM_FORCE_INLINE    inline
 #   define WOOMEM_NOINLINE
-#   define WOOMEM_PAUSE()         ((void)0)
+#endif
+
+#ifndef WOOMEM_PAUSE
+#   define WOOMEM_PAUSE()       ((void)0)
 #endif
 
 namespace woomem_cppimpl
