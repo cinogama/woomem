@@ -106,7 +106,7 @@ namespace woomem_cppimpl
         (MAX_SMALL_UNIT_SIZE + 7) / 8 + 1;
 
     // 优化：将查找表按 cache line 对齐，减少 cache miss
-    alignas(64) constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
+    constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
     {
         SMALL_8,
         SMALL_8,
@@ -770,8 +770,8 @@ namespace woomem_cppimpl
             UnitHead* m_free_unit_head;
             size_t m_free_unit_count;
         };
-        // 优化：将分配组数组按 cache line 对齐
-        alignas(64) AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+
+        AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
 
         // 优化：内联初始化单元属性，减少重复代码
         WOOMEM_FORCE_INLINE void init_allocated_unit(
