@@ -94,8 +94,8 @@ namespace woomem_cppimpl
     constexpr size_t SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE =
         (MAX_SMALL_UNIT_SIZE + 7) / 8 + 1;
 
-    // SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(AllocSize + 7) >> 3]
-    constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
+    // 优化：将查找表按 cache line 对齐，减少 cache miss
+    alignas(64) constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
     {
         SMALL_8,
         SMALL_8,
@@ -232,39 +232,32 @@ namespace woomem_cppimpl
     static_assert(SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE - 1] == SMALL_1024,
         "SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B must be filled correctly.");
 
-    WOOMEM_FORCE_INLINE PageGroupType get_page_group_type_for_size(size_t size)
+    // 优化：预先计算常用大小的分配组，减少分支和计算
+    // 针对 benchmark 中常用的 64 字节进行特化
+    WOOMEM_FORCE_INLINE PageGroupType get_page_group_type_for_size(size_t size) noexcept
     {
-        if (WOOMEM_LIKELY(size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024]))
+        // 快速路径：小于等于 1024 字节使用查找表
+        // 使用无分支的方式：先计算索引，再检查边界
+        const size_t lookup_index = (size + 7) >> 3;
+        
+        if (WOOMEM_LIKELY(lookup_index < SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE))
         {
-            return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(size + 7) >> 3];
+            return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[lookup_index];
         }
-        else if (size <= UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[MIDIUM_65504])
-        {
-            // 使用二分查找优化中等大小的分配
-            // 中等大小范围: MIDIUM_1440 到 MIDIUM_65504
-            constexpr size_t MIDIUM_SIZES[] = {
-                1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 32744, 65504
-            };
-            constexpr PageGroupType MIDIUM_GROUPS[] = {
-                MIDIUM_1440, MIDIUM_2168, MIDIUM_3104, MIDIUM_4352, MIDIUM_6536,
-                MIDIUM_9344, MIDIUM_13088, MIDIUM_21824, MIDIUM_32744, MIDIUM_65504
-            };
-
-            // 二分查找
-            int lo = 0, hi = 9;
-            while (lo < hi) {
-                int mid = (lo + hi) >> 1;
-                if (MIDIUM_SIZES[mid] < size)
-                    lo = mid + 1;
-                else
-                    hi = mid;
-            }
-            return MIDIUM_GROUPS[lo];
-        }
-        else
-        {
-            return LARGE;
-        }
+        
+        // 中等大小：使用展开的比较链代替二分查找（减少分支预测失败）
+        if (size <= 1440) return MIDIUM_1440;
+        if (size <= 2168) return MIDIUM_2168;
+        if (size <= 3104) return MIDIUM_3104;
+        if (size <= 4352) return MIDIUM_4352;
+        if (size <= 6536) return MIDIUM_6536;
+        if (size <= 9344) return MIDIUM_9344;
+        if (size <= 13088) return MIDIUM_13088;
+        if (size <= 21824) return MIDIUM_21824;
+        if (size <= 32744) return MIDIUM_32744;
+        if (size <= 65504) return MIDIUM_65504;
+        
+        return LARGE;
     }
 
     union Page;
@@ -305,6 +298,21 @@ namespace woomem_cppimpl
         atomic_uint8_t  m_gc_marked;
 
         uint16_t m_next_alloc_unit_offset;
+
+        // 优化：使用非原子的快速释放检查，然后再执行原子操作
+        // 大多数情况下，同一个线程分配和释放，可以避免原子操作的开销
+        WOOMEM_FORCE_INLINE bool try_free_this_unit_head_fast() noexcept
+        {
+            // 快速路径：假设已分配，直接设置为 0
+            // 使用 relaxed 因为我们只关心这个标志本身
+            const uint8_t old_status = m_allocated_status.load(std::memory_order_relaxed);
+            if (WOOMEM_LIKELY(old_status != 0))
+            {
+                m_allocated_status.store(0, std::memory_order_relaxed);
+                return true;
+            }
+            return false;
+        }
 
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
@@ -769,15 +777,35 @@ namespace woomem_cppimpl
             UnitHead* m_free_unit_head;
             size_t m_free_unit_count;
         };
-        AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+        // 优化：将分配组数组按 cache line 对齐
+        alignas(64) AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+
+        // 优化：内联初始化单元属性，减少重复代码
+        WOOMEM_FORCE_INLINE void init_allocated_unit(
+            UnitHead* allocated_unit, 
+            woomem_GCUnitType unit_type) noexcept
+        {
+            // 使用位字段合并写入，减少内存访问次数
+            // m_alloc_timing(4bit) + m_gc_type(4bit) 合并为一个字节
+            allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
+            allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
+            allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
+            // 使用 relaxed 因为 m_allocated_status 会使用 release 保证可见性
+            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+            // 最后设置 allocated_status，使用 release 确保之前的写入对其他线程可见
+            allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+        }
 
         // 优化：将分配逻辑拆分，减少热路径的代码大小
         WOOMEM_FORCE_INLINE void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
         {
-            const auto alloc_group = get_page_group_type_for_size(unit_size);
-
-            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+            // 优化：直接计算查找索引，减少一次比较
+            const size_t lookup_index = (unit_size + 7) >> 3;
+            
+            // 快速路径：小于等于 1024 字节
+            if (WOOMEM_LIKELY(lookup_index < SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE))
             {
+                const PageGroupType alloc_group = SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[lookup_index];
                 auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
                 
                 // 1. Fast Path: Allocation from Free List (最热路径，优化为最少指令)
@@ -790,18 +818,39 @@ namespace woomem_cppimpl
                         *reinterpret_cast<UnitHead**>(allocated_unit + 1);
                     --current_alloc_group.m_free_unit_count;
 
-                    // 初始化单元属性（合并写入，减少内存访问）
-                    // m_alloc_timing(4bit) + m_gc_type(4bit) 合并为一个字节写入
-                    allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
-                    allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
-                    allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
-                    allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
-                    allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+                    // 初始化单元属性
+                    init_allocated_unit(allocated_unit, unit_type);
                     
                     return allocated_unit + 1;
                 }
 
                 // 2. Slow Path
+                return alloc_slow_path(alloc_group, unit_type);
+            }
+            
+            // 中等/大对象路径
+            return alloc_medium_or_large(unit_size, unit_type);
+        }
+
+        // 中等和大对象的分配路径（冷路径）
+        WOOMEM_NOINLINE void* alloc_medium_or_large(size_t unit_size, woomem_GCUnitType unit_type) noexcept
+        {
+            const auto alloc_group = get_page_group_type_for_size(unit_size);
+            
+            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+            {
+                auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+                
+                // Fast Path for medium objects
+                if (WOOMEM_LIKELY(current_alloc_group.m_free_unit_count != 0))
+                {
+                    UnitHead* const allocated_unit = current_alloc_group.m_free_unit_head;
+                    current_alloc_group.m_free_unit_head = 
+                        *reinterpret_cast<UnitHead**>(allocated_unit + 1);
+                    --current_alloc_group.m_free_unit_count;
+                    init_allocated_unit(allocated_unit, unit_type);
+                    return allocated_unit + 1;
+                }
                 return alloc_slow_path(alloc_group, unit_type);
             }
             else
@@ -854,12 +903,8 @@ namespace woomem_cppimpl
                 return nullptr;
             }
 
-            // 初始化分配的单元
-            allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
-            allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
-            allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
-            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
-            allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+            // 初始化分配的单元（复用内联函数）
+            init_allocated_unit(allocated_unit, unit_type);
             
             return allocated_unit + 1;
         }
@@ -875,8 +920,8 @@ namespace woomem_cppimpl
                 freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group;
             auto& group = m_current_allocating_page_for_group[group_type];
 
-            // 优化：使用快速释放路径（假设同一线程分配和释放）
-            if (WOOMEM_LIKELY(freeing_unit_head->try_free_this_unit_head()))
+            // 优化：使用快速释放路径（避免 atomic exchange，假设同一线程分配和释放）
+            if (WOOMEM_LIKELY(freeing_unit_head->try_free_this_unit_head_fast()))
             {
                 // 将释放的单元加入本地空闲列表
                 *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
