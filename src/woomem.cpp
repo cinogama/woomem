@@ -773,6 +773,7 @@ namespace woomem_cppimpl
         struct AllocFreeGroup
         {
             Page* m_allocating_page;
+            size_t m_allocating_page_count;
 
             UnitHead* m_free_unit_head;
             size_t m_free_unit_count;
@@ -840,7 +841,7 @@ namespace woomem_cppimpl
             if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
             {
                 auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
-                
+
                 // Fast Path for medium objects
                 if (WOOMEM_LIKELY(current_alloc_group.m_free_unit_count != 0))
                 {
@@ -864,6 +865,14 @@ namespace woomem_cppimpl
         WOOMEM_NOINLINE void* alloc_slow_path(PageGroupType alloc_group, woomem_GCUnitType unit_type) noexcept
         {
             auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+            if (WOOMEM_UNLIKELY(0 == current_alloc_group.m_allocating_page_count))
+            {
+                if (WOOMEM_UNLIKELY(!lazy_init_group(alloc_group)))
+                {
+                    return nullptr;
+                }
+            }
+
             auto*& current_alloc_page = current_alloc_group.m_allocating_page;
             UnitHead* allocated_unit;
 
@@ -891,10 +900,22 @@ namespace woomem_cppimpl
                 {
                     // Got a new page from global pool.
                     current_alloc_page->m_page_head.m_next_page = new_page;
-                    new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
 
-                    next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
+                    if (current_alloc_group.m_allocating_page_count<
+                        THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP)
+                    {
+                        // Cache this page in local pool.
+                        ++current_alloc_group.m_allocating_page_count;
 
+                        // Link new page to next_page.
+                        new_page->m_page_head.m_next_page = next_page;
+                    }
+                    else
+                    {
+                        // Drop run out page.
+                        new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
+                        next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
+                    }
                     current_alloc_page = new_page;
                     continue;
                 }
@@ -930,6 +951,26 @@ namespace woomem_cppimpl
             }
         }
 
+        WOOMEM_NOINLINE bool lazy_init_group(PageGroupType group_type) noexcept
+        {
+            auto& group = m_current_allocating_page_for_group[group_type];
+
+            // 只分配一个页面作为初始页面，后续按需增加
+            Page* initial_page = g_global_page_collection.try_get_free_page(group_type);
+            if (WOOMEM_UNLIKELY(initial_page == nullptr))
+            {
+                return false;
+            }
+
+            // 形成单元素循环链表
+            initial_page->m_page_head.m_next_page = initial_page;
+
+            group.m_allocating_page = initial_page;
+            group.m_allocating_page_count = 1;
+
+            return true;
+        }
+
         ThreadLocalPageCollection() noexcept
             : m_alloc_timing{ 0 }
         {
@@ -937,28 +978,9 @@ namespace woomem_cppimpl
                 t < PageGroupType::LARGE;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
-                Page* reserved_pages[THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
-
-                for (Page*& page : reserved_pages)
-                {
-                    page = g_global_page_collection.try_get_free_page(t);
-                    if (WOOMEM_UNLIKELY(page == nullptr))
-                    {
-                        // Oh... wtf...
-
-                        // TODO: Solve this problem later.
-                        abort();
-                    }
-                }
-
-                for (size_t i = 0; i < THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP; ++i)
-                {
-                    reserved_pages[i]->m_page_head.m_next_page =
-                        reserved_pages[(i + 1) % THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP];
-                }
-
                 auto& group = m_current_allocating_page_for_group[t];
-                group.m_allocating_page = reserved_pages[0];
+                group.m_allocating_page = nullptr;
+                group.m_allocating_page_count = 0;
                 group.m_free_unit_head = nullptr;
                 group.m_free_unit_count = 0;
             }
@@ -989,15 +1011,18 @@ namespace woomem_cppimpl
                     freeing_unit_head = next_freeing_unit_head;
                 }
 
-                Page* const first_freeing_page = group.m_allocating_page;
-                Page* freeing_page = first_freeing_page;
-                do
+                if (group.m_allocating_page_count > 0)
                 {
-                    Page* const next_page = freeing_page->m_page_head.m_next_page;
-                    g_global_page_collection.return_free_page(freeing_page);
-                    freeing_page = next_page;
+                    Page* const first_freeing_page = group.m_allocating_page;
+                    Page* freeing_page = first_freeing_page;
+                    do
+                    {
+                        Page* const next_page = freeing_page->m_page_head.m_next_page;
+                        g_global_page_collection.return_free_page(freeing_page);
+                        freeing_page = next_page;
 
-                } while (freeing_page != first_freeing_page);
+                    } while (freeing_page != first_freeing_page);
+                }
             }
         }
 
