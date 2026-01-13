@@ -1137,16 +1137,9 @@ void woomem_shutdown(void)
     // 获取新大小对应的分配组
     const PageGroupType new_group_type = get_page_group_type_for_size(new_size);
 
-    // 策略1：如果新大小仍在同一个分配组内，直接返回原指针（无需重分配）
-    // 这是最高效的情况，因为分配组内的单元大小是固定的
-    if (WOOMEM_LIKELY(new_group_type == old_group_type))
-    {
-        return ptr;
-    }
-
-    // 策略2：如果新大小比当前分配组小，检查是否值得缩小
+    // 如果新大小比当前分配组小，检查是否值得缩小
     // 只有当新分配组比旧分配组小至少2级时才进行缩小，避免频繁的收缩/扩展
-    if (new_group_type < old_group_type)
+    if (new_group_type <= old_group_type)
     {
         // 计算分配组差距
         const uint8_t group_diff =
@@ -1161,7 +1154,7 @@ void woomem_shutdown(void)
         // 差距较大时，进行缩小以节省内存
     }
 
-    // 策略3：需要分配新内存（扩大或显著缩小的情况）
+    // 需要分配新内存（扩大或显著缩小的情况）
     // 保留原有的 GC 类型
     const woomem_GCUnitType gc_type = 
         static_cast<woomem_GCUnitType>(old_unit_head->m_gc_type);
