@@ -299,21 +299,6 @@ namespace woomem_cppimpl
 
         uint16_t m_next_alloc_unit_offset;
 
-        // 优化：使用非原子的快速释放检查，然后再执行原子操作
-        // 大多数情况下，同一个线程分配和释放，可以避免原子操作的开销
-        WOOMEM_FORCE_INLINE bool try_free_this_unit_head_fast() noexcept
-        {
-            // 快速路径：假设已分配，直接设置为 0
-            // 使用 relaxed 因为我们只关心这个标志本身
-            const uint8_t old_status = m_allocated_status.load(std::memory_order_relaxed);
-            if (WOOMEM_LIKELY(old_status != 0))
-            {
-                m_allocated_status.store(0, std::memory_order_relaxed);
-                return true;
-            }
-            return false;
-        }
-
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
             if (WOOMEM_LIKELY(m_allocated_status.exchange(0, std::memory_order_relaxed)))
@@ -942,7 +927,7 @@ namespace woomem_cppimpl
             auto& group = m_current_allocating_page_for_group[group_type];
 
             // 优化：使用快速释放路径（避免 atomic exchange，假设同一线程分配和释放）
-            if (WOOMEM_LIKELY(freeing_unit_head->try_free_this_unit_head_fast()))
+            if (WOOMEM_LIKELY(freeing_unit_head->try_free_this_unit_head()))
             {
                 // 将释放的单元加入本地空闲列表
                 *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
