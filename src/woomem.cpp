@@ -85,9 +85,20 @@ namespace woomem_cppimpl
         MIDIUM_32744,
         MIDIUM_65504,
 
-        LARGE,
+        TOTAL_GROUP_COUNT,
 
-        TOTAL_GROUP_COUNT = LARGE,
+        LARGE_131056 = TOTAL_GROUP_COUNT,
+                                // 131056 Bytes
+        LARGE_262128,           // 262128 Bytes
+        LARGE_524272,           // 524272 Bytes
+        LARGE_1048560,          // 1048560 Bytes
+        LARGE_2097136,          // 2097136 Bytes
+        LARGE_4194288,          // 4194288 Bytes
+        LARGE_8388616,          // 8388616 Bytes
+        LARGE_16777200,         // 16777200 Bytes
+        LARGE_33554416,         // 33554416 Bytes
+        LARGE_67108848,         // 67108848 Bytes
+        HUGE,                   // >= 64MB
     };
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
     {
@@ -96,10 +107,16 @@ namespace woomem_cppimpl
 
         // Medium page groups
         1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 32744, 65504,
+
+        // Large page groups
+        131056, 262128, 524272, 1048560, 2097136, 4194288, 8388616,
+        16777200, 33554416, 67108848,
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_65504] == 65504,
+        "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
+    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::LARGE_67108848] == 67108848,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
 
     constexpr size_t MAX_SMALL_UNIT_SIZE = 1024;
@@ -245,7 +262,6 @@ namespace woomem_cppimpl
         "SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B must be filled correctly.");
 
     // 优化：预先计算常用大小的分配组，减少分支和计算
-    // 针对 benchmark 中常用的 64 字节进行特化
     WOOMEM_FORCE_INLINE PageGroupType get_page_group_type_for_size(size_t size) noexcept
     {
         // 快速路径：小于等于 1024 字节使用查找表
@@ -274,8 +290,28 @@ namespace woomem_cppimpl
             return MIDIUM_32744;
         if (size <= 65504) 
             return MIDIUM_65504;
+        if (size <= 131056)
+            return LARGE_131056;
+        if (size <= 262128)
+            return LARGE_262128;
+        if (size <= 524272)
+            return LARGE_524272;
+        if (size <= 1048560)
+            return LARGE_1048560;
+        if (size <= 2097136)
+            return LARGE_2097136;
+        if (size <= 4194288)
+            return LARGE_4194288;
+        if (size <= 8388616)
+            return LARGE_8388616;
+        if (size <= 16777200)
+            return LARGE_16777200;
+        if (size <= 33554416)
+            return LARGE_33554416;
+        if (size <= 67108848)
+            return LARGE_67108848;
 
-        return LARGE;
+        return HUGE;
     }
 
     union Page;
@@ -842,7 +878,7 @@ namespace woomem_cppimpl
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
 
-            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+            if (WOOMEM_LIKELY(alloc_group != PageGroupType::HUGE))
             {
                 auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
 
@@ -979,7 +1015,7 @@ namespace woomem_cppimpl
             : m_alloc_timing{ 0 }
         {
             for (PageGroupType t = PageGroupType::SMALL_8;
-                t < PageGroupType::LARGE;
+                t < PageGroupType::TOTAL_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
                 auto& group = m_current_allocating_page_for_group[t];
@@ -998,7 +1034,7 @@ namespace woomem_cppimpl
             }
 
             for (PageGroupType t = PageGroupType::SMALL_8;
-                t < PageGroupType::LARGE;
+                t < PageGroupType::TOTAL_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
                 auto& group = m_current_allocating_page_for_group[t];
@@ -1154,12 +1190,12 @@ void woomem_shutdown(void)
     }
 
     // 获取旧的实际分配大小
-    const size_t old_unit_size = (old_group_type < PageGroupType::LARGE)
+    const size_t old_unit_size = (old_group_type < PageGroupType::TOTAL_GROUP_COUNT)
         ? UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[old_group_type]
         : 0; // LARGE 类型暂不支持
 
     // 如果是 LARGE 类型，暂时使用简单策略（分配+复制+释放）
-    if (WOOMEM_UNLIKELY(old_group_type == PageGroupType::LARGE))
+    if (WOOMEM_UNLIKELY(old_group_type == PageGroupType::HUGE))
     {
         // TODO: 实现 LARGE 类型的 realloc
         abort();
