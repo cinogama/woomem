@@ -16,17 +16,19 @@ using namespace std;
 #   define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
 #   define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
 #   define WOOMEM_FORCE_INLINE    __attribute__((always_inline)) inline
+#   define WOOMEM_NOINLINE        __attribute__((noinline))
 #   define WOOMEM_PAUSE()         __builtin_ia32_pause()
 #elif defined(_MSC_VER)
 #   include <intrin.h>
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
 #   define WOOMEM_FORCE_INLINE    __forceinline
+#   define WOOMEM_NOINLINE        __declspec(noinline)
 #   define WOOMEM_PAUSE()         _mm_pause()
 #else
 #   define WOOMEM_LIKELY(x)       (x)
 #   define WOOMEM_UNLIKELY(x)     (x)
-#   define WOOMEM_ALWAYS_INLINE   inline
+#   define WOOMEM_FORCE_INLINE    inline
 #   define WOOMEM_NOINLINE
 #   define WOOMEM_PAUSE()         ((void)0)
 #endif
@@ -306,18 +308,9 @@ namespace woomem_cppimpl
 
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
-            uint8_t expected_status = 1;
-            if (WOOMEM_LIKELY(
-                m_allocated_status.compare_exchange_strong(
-                    expected_status,
-                    0,
-                    std::memory_order_relaxed,
-                    std::memory_order_relaxed)))
+            if (WOOMEM_LIKELY(m_allocated_status.exchange(0, std::memory_order_relaxed)))
             {
-                m_gc_age = NEW_BORN_GC_AGE;
-                m_gc_marked.store(
-                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
-
+                // 延迟 GC 字段重置到下次分配时
                 return true;
             }
             return false;
@@ -778,95 +771,116 @@ namespace woomem_cppimpl
         };
         AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
 
-        void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
+        // 优化：将分配逻辑拆分，减少热路径的代码大小
+        WOOMEM_FORCE_INLINE void* alloc(size_t unit_size, woomem_GCUnitType unit_type) noexcept
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
 
-            if (WOOMEM_UNLIKELY(alloc_group == PageGroupType::LARGE))
+            if (WOOMEM_LIKELY(alloc_group != PageGroupType::LARGE))
+            {
+                auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+                
+                // 1. Fast Path: Allocation from Free List (最热路径，优化为最少指令)
+                if (WOOMEM_LIKELY(current_alloc_group.m_free_unit_count != 0))
+                {
+                    UnitHead* const allocated_unit = current_alloc_group.m_free_unit_head;
+                    
+                    // 从用户数据区读取下一个空闲单元指针
+                    current_alloc_group.m_free_unit_head = 
+                        *reinterpret_cast<UnitHead**>(allocated_unit + 1);
+                    --current_alloc_group.m_free_unit_count;
+
+                    // 初始化单元属性（合并写入，减少内存访问）
+                    // m_alloc_timing(4bit) + m_gc_type(4bit) 合并为一个字节写入
+                    allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
+                    allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
+                    allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
+                    allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+                    allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+                    
+                    return allocated_unit + 1;
+                }
+
+                // 2. Slow Path
+                return alloc_slow_path(alloc_group, unit_type);
+            }
+            else
             {
                 // TODO: Large alloc
                 abort();
             }
+        }
 
+        // 慢速路径：从页面分配
+        WOOMEM_NOINLINE void* alloc_slow_path(PageGroupType alloc_group, woomem_GCUnitType unit_type) noexcept
+        {
             auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
+            auto*& current_alloc_page = current_alloc_group.m_allocating_page;
             UnitHead* allocated_unit;
 
-            // 1. Fast Path: Allocation from Free List
-            if (WOOMEM_LIKELY(current_alloc_group.m_free_unit_count > 0))
+            while (true)
             {
-                allocated_unit = current_alloc_group.m_free_unit_head;
-                
-                // Next free unit pointer is stored at the beginning of the user payload area.
-                current_alloc_group.m_free_unit_head = *reinterpret_cast<UnitHead**>(allocated_unit + 1);
-                --current_alloc_group.m_free_unit_count;
-            }
-            else
-            {
-                // 2. Slow Path: Allocation from Page
-                auto*& current_alloc_page = current_alloc_group.m_allocating_page;
-
-                while (true)
+                allocated_unit = current_alloc_page->try_allocate_unit_from_page();
+                if (WOOMEM_LIKELY(allocated_unit != nullptr))
                 {
-                    allocated_unit = current_alloc_page->try_allocate_unit_from_page();
-                    if (WOOMEM_LIKELY(allocated_unit != nullptr))
-                    {
-                        break;
-                    }
-
-                    // Page run out, try next page in this group.
-                    auto* const next_page = current_alloc_page->m_page_head.m_next_page;
-
-                    if (WOOMEM_LIKELY(next_page->try_tidy_page()))
-                    {
-                        current_alloc_page = next_page;
-                        continue;
-                    }
-
-                    // This page run out, drop it and try get new pages from global pool.
-                    auto* const new_page = g_global_page_collection.try_get_free_page(alloc_group);
-
-                    if (WOOMEM_LIKELY(new_page != nullptr))
-                    {
-                        // Got a new page from global pool.
-                        current_alloc_page->m_page_head.m_next_page = new_page;
-                        new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
-
-                        next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
-
-                        current_alloc_page = new_page;
-                        continue;
-                    }
-
-                    // We have tried all method to get new unit, alloc failed...
-                    return nullptr;
+                    break;
                 }
+
+                // Page run out, try next page in this group.
+                auto* const next_page = current_alloc_page->m_page_head.m_next_page;
+
+                if (WOOMEM_LIKELY(next_page->try_tidy_page()))
+                {
+                    current_alloc_page = next_page;
+                    continue;
+                }
+
+                // This page run out, drop it and try get new pages from global pool.
+                auto* const new_page = g_global_page_collection.try_get_free_page(alloc_group);
+
+                if (WOOMEM_LIKELY(new_page != nullptr))
+                {
+                    // Got a new page from global pool.
+                    current_alloc_page->m_page_head.m_next_page = new_page;
+                    new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
+
+                    next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
+
+                    current_alloc_page = new_page;
+                    continue;
+                }
+
+                // We have tried all method to get new unit, alloc failed...
+                return nullptr;
             }
 
-            // 3. Initialize Allocated Unit
-            // Init unit attribute before m_allocated_status is set to 1.
+            // 初始化分配的单元
             allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
             allocated_unit->m_gc_type = static_cast<uint8_t>(unit_type);
-
-            // Unit allocated.
+            allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
+            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
             allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+            
             return allocated_unit + 1;
         }
-        void free(void* unit)
+
+        WOOMEM_FORCE_INLINE void free(void* unit) noexcept
         {
             UnitHead* const freeing_unit_head =
                 reinterpret_cast<UnitHead*>(
                     reinterpret_cast<char*>(unit) - sizeof(UnitHead));
 
-            auto& group = m_current_allocating_page_for_group[
-                freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group];
+            // 获取 page group 类型
+            const PageGroupType group_type = 
+                freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group;
+            auto& group = m_current_allocating_page_for_group[group_type];
 
-            if (freeing_unit_head->try_free_this_unit_head())
+            // 优化：使用快速释放路径（假设同一线程分配和释放）
+            if (WOOMEM_LIKELY(freeing_unit_head->try_free_this_unit_head()))
             {
-                // This unit is freed by current thread.
-
+                // 将释放的单元加入本地空闲列表
                 *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
                 group.m_free_unit_head = freeing_unit_head;
-
                 ++group.m_free_unit_count;
             }
         }
