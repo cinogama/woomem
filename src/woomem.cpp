@@ -56,6 +56,10 @@ namespace woomem_cppimpl
 
     constexpr size_t BASE_ALIGNMENT = 8;                // 8 Bytes
 
+    constexpr size_t LARGE_SPACE_HEAD_SIZE = 32;        // 32 Bytes header for large space
+
+    constexpr size_t MOST_LARGE_UNIT_SIZE = 8 * PAGE_SIZE - LARGE_SPACE_HEAD_SIZE;
+
     constexpr uint8_t NEW_BORN_GC_AGE = 15;
 
     enum PageGroupType : uint8_t
@@ -82,23 +86,22 @@ namespace woomem_cppimpl
         MIDIUM_9344,
         MIDIUM_13088,
         MIDIUM_21824,
-        MIDIUM_32744,
-        MIDIUM_65504,
 
         FAST_AND_MIDIUM_GROUP_COUNT,
 
-        LARGE_131056 = FAST_AND_MIDIUM_GROUP_COUNT,
-        // 131056 Bytes
-        LARGE_262128,           // 262128 Bytes
-        LARGE_524272,           // 524272 Bytes
-        LARGE_1048560,          // 1048560 Bytes
-        LARGE_2097136,          // 2097136 Bytes
-        LARGE_4194288,          // 4194288 Bytes
-        LARGE_8388616,          // 8388616 Bytes
-        LARGE_16777200,         // 16777200 Bytes
-        LARGE_33554416,         // 33554416 Bytes
-        LARGE_67108848,         // 67108848 Bytes
-        HUGE,                   // >= 64MB
+        LARGE_PAGES_1 = FAST_AND_MIDIUM_GROUP_COUNT,
+        LARGE_PAGES_2,
+        LARGE_PAGES_3,
+        LARGE_PAGES_4,
+        LARGE_PAGES_5,
+        LARGE_PAGES_6,
+        LARGE_PAGES_7,
+        LARGE_PAGES_8,
+
+        TOTAL_GROUP_COUNT,
+
+        // >= 64MB
+        HUGE = TOTAL_GROUP_COUNT,
     };
     constexpr size_t PAGE_GROUP_NEED_PAGE_COUNTS[] =
     {
@@ -124,21 +127,21 @@ namespace woomem_cppimpl
         1,
         1,
         1,
-        1,
-        1,
 
+        // LARGE_PAGES
+        1,
         2,
+        3,
         4,
+        5,
+        6,
+        7,
         8,
-        16,
-        32,
-        64,
-        128,
-        256,
-        512,
-        1024,
     };
-    static_assert(PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_131056] == 2,
+    static_assert(
+        PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_1] == 1
+        && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_2] == 2
+        && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_8] == 8,
         "PAGE_GROUP_NEED_PAGE_COUNTS must be correct.");
 
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
@@ -147,17 +150,11 @@ namespace woomem_cppimpl
         8, 24, 40, 56, 88, 128, 192, 264, 344, 488, 704, 920, 1024,
 
         // Medium page groups
-        1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 32744, 65504,
-
-        // Large page groups
-        131056, 262128, 524272, 1048560, 2097136, 4194288, 8388616,
-        16777200, 33554416, 67108848,
+        1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824,
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
-    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_65504] == 65504,
-        "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
-    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::LARGE_67108848] == 67108848,
+    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_21824] == 21824,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
 
     constexpr size_t MAX_SMALL_UNIT_SIZE = 1024;
@@ -311,6 +308,7 @@ namespace woomem_cppimpl
 
         if (WOOMEM_LIKELY(lookup_index < SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE))
             return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[lookup_index];
+
         if (size <= 1440)
             return MIDIUM_1440;
         if (size <= 2168)
@@ -327,31 +325,12 @@ namespace woomem_cppimpl
             return MIDIUM_13088;
         if (size <= 21824)
             return MIDIUM_21824;
-        if (size <= 32744)
-            return MIDIUM_32744;
-        if (size <= 65504)
-            return MIDIUM_65504;
-        if (size <= 131056)
-            return LARGE_131056;
-        if (size <= 262128)
-            return LARGE_262128;
-        if (size <= 524272)
-            return LARGE_524272;
-        if (size <= 1048560)
-            return LARGE_1048560;
-        if (size <= 2097136)
-            return LARGE_2097136;
-        if (size <= 4194288)
-            return LARGE_4194288;
-        if (size <= 8388616)
-            return LARGE_8388616;
-        if (size <= 16777200)
-            return LARGE_16777200;
-        if (size <= 33554416)
-            return LARGE_33554416;
-        if (size <= 67108848)
-            return LARGE_67108848;
 
+        if (size <= MOST_LARGE_UNIT_SIZE)
+        {
+            return static_cast<PageGroupType>(
+                LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) >> 5 /* div PAGE_SIZE */));
+        }
         return HUGE;
     }
 
@@ -367,9 +346,7 @@ namespace woomem_cppimpl
         // 单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
         // 
         // m_abondon_page_flag 将在页面被抛弃时设置
-        //
-        // 将统计被抛弃的页面总数，达到一定值时，GC 将把可以复用的页面重新
-        // 拉起。
+
         atomic_uint8_t  m_abondon_page_flag;
         atomic_uint16_t m_free_times;
 
@@ -388,7 +365,7 @@ namespace woomem_cppimpl
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-            m_gc_type : 4;
+                        m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
@@ -403,6 +380,15 @@ namespace woomem_cppimpl
             assert(1 == m_allocated_status.load(std::memory_order_relaxed));
             m_allocated_status.store(0, std::memory_order_relaxed);
         }
+        WOOMEM_FORCE_INLINE void init_unit_head() noexcept
+        {
+            m_allocated_status.store(0, std::memory_order_relaxed);
+
+            /* unit_head->m_alloc_timing will be set when allocate. */
+            m_gc_age = NEW_BORN_GC_AGE;
+            m_gc_marked.store(
+                WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+        }
     };
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
@@ -415,7 +401,7 @@ namespace woomem_cppimpl
         void reinit_page_with_group(PageGroupType group_type) noexcept
         {
             // Only empty and new page can be reinit.
-            assert(group_type != PageGroupType::LARGE);
+            assert(group_type < PageGroupType::LARGE_PAGES_1);
 
             m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
@@ -440,12 +426,7 @@ namespace woomem_cppimpl
                     reinterpret_cast<UnitHead*>(&m_entries[current_unit_head_begin]);
 
                 unit_head->m_parent_page = this;
-                unit_head->m_allocated_status.store(0, std::memory_order_relaxed);
-
-                /* unit_head->m_alloc_timing will be set when allocate. */
-                unit_head->m_gc_age = NEW_BORN_GC_AGE;
-                unit_head->m_gc_marked.store(
-                    WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+                unit_head->init_unit_head();
 
                 next_unit_offset_ptr = &unit_head->m_next_alloc_unit_offset;
             }
@@ -563,6 +544,25 @@ namespace woomem_cppimpl
     static_assert(sizeof(Page) == PAGE_SIZE,
         "Page size must be equal to PAGE_SIZE");
 
+    struct LargePageUnitHead
+    {
+        PageHead m_page_head;
+        UnitHead m_unit_head;
+
+        void init_for_large_page_unit(PageGroupType group_type)
+        {
+            m_page_head.m_page_belong_to_group = group_type;
+            m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
+            m_page_head.m_free_times.store(0, std::memory_order_relaxed);
+
+            m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
+            m_page_head.m_next_alloc_unit_head_offset = 0;
+
+            m_unit_head.m_parent_page = nullptr;
+            m_unit_head.init_unit_head();
+        }
+    };
+
     struct Chunk
     {
         static atomic<Chunk*> g_current_chunk;
@@ -574,7 +574,9 @@ namespace woomem_cppimpl
 
         Page* const m_reserved_address_begin;
         Page* const m_reserved_address_end;
-        std::atomic_uint64_t m_cardtable[CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 64];
+
+        // std::atomic_uint64_t m_cardtable[CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 64];
+        // uint8_t m_multi_page_unit_flags[CHUNK_SIZE / PAGE_SIZE];
 
         static_assert(std::atomic_uint64_t::is_always_lock_free,
             "atomic_uint64_t must be lock free for performance");
@@ -586,7 +588,7 @@ namespace woomem_cppimpl
             , m_reserved_address_begin(reinterpret_cast<Page*>(reserved_address))
             , m_reserved_address_end(reinterpret_cast<Page*>(
                 reinterpret_cast<uint8_t*>(reserved_address) + CHUNK_SIZE))
-            , m_cardtable{}
+            // , m_cardtable{}
         {
             assert(reserved_address != nullptr);
         }
@@ -618,9 +620,11 @@ namespace woomem_cppimpl
             (void)release_status;
         }
 
-        /* OPTIONAL */ Page* allocate_new_page_in_chunk(
+        /* OPTIONAL */ void* allocate_new_page_in_chunk(
             PageGroupType page_group, bool* out_page_run_out) noexcept
         {
+            assert(page_group < TOTAL_GROUP_COUNT);
+
             const size_t need_group_count = PAGE_GROUP_NEED_PAGE_COUNTS[page_group];
 
             size_t new_page_index =
@@ -649,7 +653,7 @@ namespace woomem_cppimpl
 
             } while (true);
 
-            Page* new_alloc_page = &m_reserved_address_begin[new_page_index];
+            void* new_alloc_page = &m_reserved_address_begin[new_page_index];
             const auto status = woomem_os_commit_memory(
                 new_alloc_page,
                 need_group_count * PAGE_SIZE);
@@ -658,7 +662,16 @@ namespace woomem_cppimpl
             {
                 // Init this page.
                 // NOTE: Even we commit multiple pages, only the first page need init.
-                new_alloc_page->reinit_page_with_group(page_group);
+                if (page_group < PageGroupType::LARGE_PAGES_1)
+                    reinterpret_cast<Page*>(new_alloc_page)->reinit_page_with_group(
+                        page_group);
+                else
+                {
+                    reinterpret_cast<LargePageUnitHead*>(new_alloc_page)->init_for_large_page_unit(
+                        page_group);
+
+                    // Init multi page flags;
+                }
 
                 // Wait until other threads finish committing.
                 do
@@ -760,7 +773,7 @@ namespace woomem_cppimpl
             return new_chunk;
         }
 
-        static /* OPTIONAL */ Page* allocate_new_page(PageGroupType page_group)
+        static /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
             Chunk* current_chunk =
                 g_current_chunk.load(std::memory_order_relaxed);
@@ -768,7 +781,7 @@ namespace woomem_cppimpl
             do
             {
                 bool page_run_out;
-                Page* new_page = current_chunk->allocate_new_page_in_chunk(
+                void* new_page = current_chunk->allocate_new_page_in_chunk(
                     page_group, &page_run_out);
 
                 if (WOOMEM_UNLIKELY(page_run_out))
@@ -805,6 +818,13 @@ namespace woomem_cppimpl
     {
         atomic<Page*> m_free_group_page_list[FAST_AND_MIDIUM_GROUP_COUNT];
 
+        // 用于储存可分配的大对象和巨型对象实例，注意，TOTAL_GROUP_COUNT 的前 
+        // FAST_AND_MIDIUM_GROUP_COUNT 项并不使用，仅作占位（避免每次都减去这些值）。
+        atomic<Page*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
+
+        // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
+        // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
+
         /* OPTIONAL */ Page* try_get_free_page(PageGroupType group_type) noexcept
         {
             auto& group = m_free_group_page_list[group_type];
@@ -828,7 +848,7 @@ namespace woomem_cppimpl
             }
 
             // No free page in pool, allocate a new one from Chunk
-            return Chunk::allocate_new_page(group_type);
+            return reinterpret_cast<Page*>(Chunk::allocate_new_page(group_type));
         }
         void return_free_page(Page* freeing_page) noexcept
         {
@@ -848,7 +868,7 @@ namespace woomem_cppimpl
             }
         }
     };
-    GlobalPageCollection g_global_page_collection;
+    GlobalPageCollection g_global_page_collection{};
 
     constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
 
@@ -952,9 +972,16 @@ namespace woomem_cppimpl
                 }
                 return alloc_slow_path(alloc_group, unit_type_mask);
             }
+            else if (unit_size != PageGroupType::HUGE)
+            {
+                assert(unit_size < PageGroupType::HUGE);
+
+                // TODO: Large alloc
+                abort();
+            }
             else
             {
-                // TODO: Large alloc
+                // TODO: Huge alloc
                 abort();
             }
         }
