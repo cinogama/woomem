@@ -12,26 +12,21 @@ extern "C" {
     /*
     woomem_GCUnitType
     */
-    typedef enum woomem_GCUnitType
+    typedef enum woomem_GCUnitTypeMask
     {
-        /*
-        这一片内存既不是 GC单元，也不用于存储其他 GC 分配的内存，只是普通的内存分配单元。
-        */
-        WOOMEM_GC_UNIT_TYPE_NORMAL = 0,
+        // 这段内存需要在GC过程中被扫描和释放
+        WOOMEM_GC_UNIT_TYPE_NEED_SWEEP = 1 << 0,
 
-        /*
-        这一片内存可能包含一个或多个 GC 单元的 `引用`，当标记这片内存时，会自动标记其引用
-        的其他内存单元。
-        */
-        WOOMEM_GC_UNIT_TYPE_AUTO_MARK = 1,
+        // 这段内存如果被标记，需要扫描其内部的所有疑似引用
+        WOOMEM_GC_UNIT_TYPE_AUTO_MARK = 1 << 1,
 
-        /*
-        这一片内存储存一个 GC 单元，其被标记和回收时，会触发指定的标记/回收回调。同时，
-        与 WOOMEM_GC_UNIT_TYPE_AUTO_MARK 类似，这片内存引用的其他内存单元也会被自动标记。
-        */
-        WOOMEM_GC_UNIT_TYPE_IS_GCUNIT = 2,
+        // 当标记到此单元时，需要调用注册的标记回调函数
+        WOOMEM_GC_UNIT_TYPE_HAS_MARKER = 1 << 2,
 
-    } woomem_GCUnitType;
+        // 当释放此单元时，需要调用注册的析构函数
+        WOOMEM_GC_UNIT_TYPE_HAS_FINALIZER = 1 << 3,
+
+    } woomem_GCUnitTypeMask;
 
     /*
     woomem_GCMarkedType
@@ -78,8 +73,7 @@ extern "C" {
     分配指定大小的内存单元，并返回指向该内存单元的指针。
     */
     /* OPTIONAL */ void* woomem_alloc_normal(size_t size);
-    /* OPTIONAL */ void* woomem_alloc_auto_mark(size_t size);
-    /* OPTIONAL */ void* woomem_alloc_gcunit(size_t size);
+    /* OPTIONAL */ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib);
 
     /*
     重新分配给定的内存单元为新的大小，并返回新的指针。
@@ -87,8 +81,12 @@ extern "C" {
     /* OPTIONAL */ void* woomem_realloc(void* ptr, size_t new_size);
 
     /*
-    解分配给定的指针，该指针必须是合法的，与 woomem_try_mark_self 不同，分配器不会特地检
-    查指定单元的合法性。
+    解分配给定的指针，该指针必须：
+
+    1）如果 WOOMEM_GC_UNIT_TYPE_NEED_SWEEP，被释放的内存必须仍然可达（即便如此，仍然不推荐手动释放GC对象）
+    2）否则，至少依然有效，不能为空指针。
+
+    与 woomem_try_mark_self 不同，分配器不会特地检查指定单元的合法性。
     */
     void woomem_free(void* ptr);
 
@@ -126,6 +124,8 @@ extern "C" {
     void woomem_end_gc_mark_and_free_all_unmarked(
         woomem_DestroyFunc  destroy_func,
         void*               userdata);
+
+    // woomem_Bool woomem_new_gc_round_launched(void);
 
 #ifdef __cplusplus
 }
