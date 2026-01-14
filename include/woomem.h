@@ -127,8 +127,6 @@ extern "C" {
         woomem_DestroyFunc  destroy_func,
         void*               userdata);
 
-    // woomem_Bool woomem_new_gc_round_launched(void);
-
 #ifdef __cplusplus
 }
 #endif
