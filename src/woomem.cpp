@@ -88,7 +88,7 @@ namespace woomem_cppimpl
         FAST_AND_MIDIUM_GROUP_COUNT,
 
         LARGE_131056 = FAST_AND_MIDIUM_GROUP_COUNT,
-                                // 131056 Bytes
+        // 131056 Bytes
         LARGE_262128,           // 262128 Bytes
         LARGE_524272,           // 524272 Bytes
         LARGE_1048560,          // 1048560 Bytes
@@ -100,6 +100,47 @@ namespace woomem_cppimpl
         LARGE_67108848,         // 67108848 Bytes
         HUGE,                   // >= 64MB
     };
+    constexpr size_t PAGE_GROUP_NEED_PAGE_COUNTS[] =
+    {
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+
+        2,
+        4,
+        8,
+        16,
+        32,
+        64,
+        128,
+        256,
+        512,
+        1024,
+    };
+    static_assert(PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_131056] == 2,
+        "PAGE_GROUP_NEED_PAGE_COUNTS must be correct.");
+
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
     {
         // Small page groups
@@ -270,25 +311,25 @@ namespace woomem_cppimpl
 
         if (WOOMEM_LIKELY(lookup_index < SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE))
             return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[lookup_index];
-        if (size <= 1440) 
+        if (size <= 1440)
             return MIDIUM_1440;
         if (size <= 2168)
             return MIDIUM_2168;
-        if (size <= 3104) 
+        if (size <= 3104)
             return MIDIUM_3104;
-        if (size <= 4352) 
+        if (size <= 4352)
             return MIDIUM_4352;
-        if (size <= 6536) 
+        if (size <= 6536)
             return MIDIUM_6536;
-        if (size <= 9344) 
+        if (size <= 9344)
             return MIDIUM_9344;
-        if (size <= 13088) 
+        if (size <= 13088)
             return MIDIUM_13088;
-        if (size <= 21824) 
+        if (size <= 21824)
             return MIDIUM_21824;
         if (size <= 32744)
             return MIDIUM_32744;
-        if (size <= 65504) 
+        if (size <= 65504)
             return MIDIUM_65504;
         if (size <= 131056)
             return LARGE_131056;
@@ -347,7 +388,7 @@ namespace woomem_cppimpl
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-                        m_gc_type : 4;
+            m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
@@ -580,94 +621,111 @@ namespace woomem_cppimpl
         /* OPTIONAL */ Page* allocate_new_page_in_chunk(
             PageGroupType page_group, bool* out_page_run_out) noexcept
         {
+            const size_t need_group_count = PAGE_GROUP_NEED_PAGE_COUNTS[page_group];
+
             size_t new_page_index =
-                m_next_commiting_page_count.fetch_add(1, std::memory_order_relaxed);
+                m_next_commiting_page_count.load(std::memory_order_relaxed);
 
-            if (new_page_index < CHUNK_SIZE / PAGE_SIZE)
+            do
             {
-                *out_page_run_out = false;
-
-                Page* new_alloc_page = &m_reserved_address_begin[new_page_index];
-                const auto status = woomem_os_commit_memory(
-                    new_alloc_page,
-                    PAGE_SIZE);
-
-                if (status == 0)
+                const size_t desired_page_index = new_page_index + need_group_count;
+                if (WOOMEM_UNLIKELY(desired_page_index > CHUNK_SIZE / PAGE_SIZE))
                 {
-                    // Init this page.
-                    new_alloc_page->reinit_page_with_group(page_group);
-
-                    // Wait until other threads finish committing.
-                    do
-                    {
-                        size_t expected_commited = new_page_index;
-                        if (m_commited_page_count.compare_exchange_weak(
-                            expected_commited,
-                            new_page_index + 1,
-                            std::memory_order_relaxed,
-                            std::memory_order_relaxed))
-                        {
-                            // Successfully updated commited_page_count
-                            return &m_reserved_address_begin[new_page_index];
-                        }
-                        else if (m_next_commiting_page_count.load(std::memory_order_relaxed) <= new_page_index)
-                        {
-                            // Another thread has rollbacked.
-                            const int decommit_status = woomem_os_decommit_memory(
-                                &m_reserved_address_begin[new_page_index],
-                                PAGE_SIZE);
-
-                            assert(decommit_status == 0);
-                            (void)decommit_status;
-
-                            return nullptr;
-                        }
-
-                    } while (true);
-
-                    // Should not reach here.
-                    abort();
+                    // No more page in this chunk.
+                    *out_page_run_out = true;
+                    return nullptr;
                 }
-                else
+
+                if (m_next_commiting_page_count.compare_exchange_weak(
+                    new_page_index,
+                    desired_page_index,
+                    std::memory_order_relaxed,
+                    std::memory_order_relaxed))
                 {
-                    // Failed to commit, rollback.
-                    do
-                    {
-                        size_t current_commiting_page_count =
-                            m_next_commiting_page_count.load(
-                                std::memory_order_relaxed);
-
-                        if (m_next_commiting_page_count > new_page_index)
-                        {
-                            // Need rollback.
-                            if (m_next_commiting_page_count.compare_exchange_weak(
-                                current_commiting_page_count,
-                                new_page_index,
-                                std::memory_order_relaxed))
-                            {
-                                // Already rollbacked by this thread.
-                                return nullptr;
-                            }
-                            else if (current_commiting_page_count <= new_page_index)
-                            {
-                                // Another thread has rollbacked.
-                                return nullptr;
-                            }
-                        }
-                        else
-                            // Already rollbacked by other thread.
-                            return nullptr;
-
-                    } while (true);
+                    // Page space reserved successfully.
+                    *out_page_run_out = false;
+                    break;
                 }
+
+            } while (true);
+
+            Page* new_alloc_page = &m_reserved_address_begin[new_page_index];
+            const auto status = woomem_os_commit_memory(
+                new_alloc_page,
+                need_group_count * PAGE_SIZE);
+
+            if (WOOMEM_LIKELY(status == 0))
+            {
+                // Init this page.
+                // NOTE: Even we commit multiple pages, only the first page need init.
+                new_alloc_page->reinit_page_with_group(page_group);
+
+                // Wait until other threads finish committing.
+                do
+                {
+                    size_t expected_commited = new_page_index;
+                    if (m_commited_page_count.compare_exchange_weak(
+                        expected_commited,
+                        new_page_index + need_group_count,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed))
+                    {
+                        // Successfully updated commited_page_count
+                        return &m_reserved_address_begin[new_page_index];
+                    }
+                    else if (m_next_commiting_page_count.load(std::memory_order_relaxed) <= new_page_index)
+                    {
+                        // Another thread has rollbacked.
+                        const int decommit_status = woomem_os_decommit_memory(
+                            &m_reserved_address_begin[new_page_index],
+                            PAGE_SIZE);
+
+                        assert(decommit_status == 0);
+                        (void)decommit_status;
+
+                        return nullptr;
+                    }
+
+                } while (true);
+
+                // Should not reach here.
+                abort();
             }
             else
             {
-                *out_page_run_out = true;
+                // Failed to commit, rollback.
+                do
+                {
+                    size_t current_commiting_page_count =
+                        m_next_commiting_page_count.load(
+                            std::memory_order_relaxed);
 
-                // Donot need rollback, just return nullptr.
-                return nullptr;
+                    if (m_next_commiting_page_count > new_page_index)
+                    {
+                        // Need rollback.
+                        if (m_next_commiting_page_count.compare_exchange_weak(
+                            current_commiting_page_count,
+                            new_page_index,
+                            std::memory_order_relaxed))
+                        {
+                            // Already rollbacked by this thread.
+                            return nullptr;
+                        }
+                        else if (current_commiting_page_count <= new_page_index)
+                        {
+                            // Another thread has rollbacked.
+                            return nullptr;
+                        }
+                    }
+                    else
+                        // Already rollbacked by other thread.
+                        return nullptr;
+
+                } while (true);
             }
+
+            // Never reach here.
+            abort();
         }
 
         static /* OPTIONAL */ Chunk* create_new_chunk()
@@ -983,11 +1041,11 @@ namespace woomem_cppimpl
 
             // 优化：使用快速释放路径（避免 atomic exchange，假设同一线程分配和释放）
             freeing_unit_head->fast_free_unit_manually();
-            
+
             // 将释放的单元加入本地空闲列表
             *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
             group.m_free_unit_head = freeing_unit_head;
-            ++group.m_free_unit_count;   
+            ++group.m_free_unit_count;
         }
 
         WOOMEM_NOINLINE bool lazy_init_group(PageGroupType group_type) noexcept
@@ -1139,20 +1197,20 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
         // 计算分配组差距
         const uint8_t group_diff =
             static_cast<uint8_t>(old_group_type) - static_cast<uint8_t>(new_group_type);
-        
+
         // 如果差距小于2级，保持原分配不变（避免内存抖动）
         if (group_diff < 2)
         {
             return ptr;
         }
-        
+
         // 差距较大时，进行缩小以节省内存
     }
 
     // 需要分配新内存（扩大或显著缩小的情况）
     // 保留原有的 GC 类型
     void* new_ptr = woomem_alloc_attrib(
-        new_size, 
+        new_size,
         static_cast<woomem_GCUnitTypeMask>(
             old_unit_head->m_gc_type));
 
