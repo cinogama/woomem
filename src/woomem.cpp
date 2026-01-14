@@ -50,7 +50,7 @@ namespace woomem_cppimpl
     constexpr size_t PAGE_SIZE = 64 * 1024;             // 64KB
 
     /* A Chunk will store many page, each page will be used for One specified allocated size */
-    constexpr size_t CHUNK_SIZE = 128 * 1024 * 1024;    // 128MB
+    constexpr size_t CHUNK_SIZE = 256 * 1024 * 1024;    // 128MB
 
     constexpr size_t CARDTABLE_SIZE_PER_BIT = 512;      // 512 Bytes per bit
 
@@ -85,9 +85,9 @@ namespace woomem_cppimpl
         MIDIUM_32744,
         MIDIUM_65504,
 
-        TOTAL_GROUP_COUNT,
+        FAST_AND_MIDIUM_GROUP_COUNT,
 
-        LARGE_131056 = TOTAL_GROUP_COUNT,
+        LARGE_131056 = FAST_AND_MIDIUM_GROUP_COUNT,
                                 // 131056 Bytes
         LARGE_262128,           // 262128 Bytes
         LARGE_524272,           // 524272 Bytes
@@ -745,7 +745,7 @@ namespace woomem_cppimpl
 
     struct GlobalPageCollection
     {
-        atomic<Page*> m_free_group_page_list[TOTAL_GROUP_COUNT];
+        atomic<Page*> m_free_group_page_list[FAST_AND_MIDIUM_GROUP_COUNT];
 
         /* OPTIONAL */ Page* try_get_free_page(PageGroupType group_type) noexcept
         {
@@ -819,7 +819,7 @@ namespace woomem_cppimpl
             size_t m_free_unit_count;
         };
 
-        AllocFreeGroup m_current_allocating_page_for_group[TOTAL_GROUP_COUNT];
+        AllocFreeGroup m_current_allocating_page_for_group[FAST_AND_MIDIUM_GROUP_COUNT];
 
         // 优化：内联初始化单元属性，减少重复代码
         WOOMEM_FORCE_INLINE void init_allocated_unit(
@@ -1015,7 +1015,7 @@ namespace woomem_cppimpl
             : m_alloc_timing{ 0 }
         {
             for (PageGroupType t = PageGroupType::SMALL_8;
-                t < PageGroupType::TOTAL_GROUP_COUNT;
+                t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
                 auto& group = m_current_allocating_page_for_group[t];
@@ -1034,7 +1034,7 @@ namespace woomem_cppimpl
             }
 
             for (PageGroupType t = PageGroupType::SMALL_8;
-                t < PageGroupType::TOTAL_GROUP_COUNT;
+                t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
             {
                 auto& group = m_current_allocating_page_for_group[t];
@@ -1183,7 +1183,7 @@ void woomem_shutdown(void)
     }
 
     // 获取旧的实际分配大小
-    const size_t old_unit_size = (old_group_type < PageGroupType::TOTAL_GROUP_COUNT)
+    const size_t old_unit_size = (old_group_type < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT)
         ? UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[old_group_type]
         : 0; // LARGE 类型暂不支持
 
