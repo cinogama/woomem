@@ -6,7 +6,14 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-    void woomem_init(void);
+    typedef void* woomem_UserContext;
+    typedef void(*woomem_MarkCallbackFunc)(woomem_UserContext, void*);
+    typedef void(*woomem_DestroyCallbackFunc)(woomem_UserContext, void*);
+
+    void woomem_init(
+        /* OPTIONAL */ woomem_UserContext user_ctx,
+        /* OPTIONAL */ woomem_MarkCallbackFunc marker,
+        /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer);
     void woomem_shutdown(void);
 
     /*

@@ -618,7 +618,7 @@ int main(int argc, char** argv)
     printf("  woomem vs malloc Performance Benchmark\n");
     printf("========================================\n");
 
-    woomem_init();
+    woomem_init(NULL, NULL, NULL);
 
     // 预热
     printf("\nWarming up...\n");

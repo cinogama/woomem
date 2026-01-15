@@ -47,6 +47,100 @@ using namespace std;
 
 namespace woomem_cppimpl
 {
+    class RWSpin
+    {
+        atomic_uint32_t m_spin_mark;
+        static constexpr uint32_t WRITE_LOCK_MASK = 0x80000000u;
+
+    public:
+        RWSpin() noexcept : m_spin_mark{ 0 } {}
+        RWSpin(const RWSpin&) = delete;
+        RWSpin(RWSpin&&) = delete;
+        RWSpin& operator=(const RWSpin&) = delete;
+        RWSpin& operator=(RWSpin&&) = delete;
+
+        void lock() noexcept
+        {
+            do
+            {
+                uint32_t prev_status =
+                    m_spin_mark.fetch_or(
+                        WRITE_LOCK_MASK,
+                        std::memory_order_acq_rel);
+
+                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
+                {
+                    // Lock acquired, check until all readers are gone.
+                    if (prev_status != 0)
+                    {
+                        // Still have other readers.
+                        do
+                        {
+                            WOOMEM_PAUSE();
+                            prev_status = m_spin_mark.load(std::memory_order_acquire);
+
+                        } while (prev_status != WRITE_LOCK_MASK);
+                    }
+                    break;
+                }
+
+                // Or, someone else is holding the write lock, wait.
+                WOOMEM_PAUSE();
+            } while (true);
+        }
+        void unlock() noexcept
+        {
+            assert(m_spin_mark.load(std::memory_order_relaxed) == WRITE_LOCK_MASK);
+            m_spin_mark.store(0, std::memory_order_release);
+        }
+        void lock_shared() noexcept
+        {
+            do
+            {
+                uint32_t prev_status = m_spin_mark.load(std::memory_order_acquire);
+                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
+                {
+                    // No write lock mask, try to add reader count.
+                    do
+                    {
+                        if (m_spin_mark.compare_exchange_strong(
+                            prev_status,
+                            prev_status + 1,
+                            std::memory_order_release,
+                            std::memory_order_relaxed))
+                            // Ok, acquired shared lock.
+                            return;
+
+                        if (0 != (prev_status & WRITE_LOCK_MASK))
+                            // Write lock mask appeared, roll back.
+                            break;
+
+                        WOOMEM_PAUSE();
+                        prev_status = m_spin_mark.load(std::memory_order_relaxed);
+
+                    } while (true);
+                }
+                WOOMEM_PAUSE();
+            } while (true);
+        }
+        void unlock_shared() noexcept
+        {
+            const uint32_t prev_status =
+                m_spin_mark.fetch_sub(1, std::memory_order_release);
+
+            (void)prev_status;
+            assert(0 != (prev_status & ~WRITE_LOCK_MASK));
+        }
+    };
+
+    struct GlobalMarkContext
+    {
+        woomem_UserContext          m_user_ctx;
+        woomem_MarkCallbackFunc     m_marker;
+        woomem_DestroyCallbackFunc  m_destroyer;
+    };
+    GlobalMarkContext g_global_mark_ctx;
+
     constexpr size_t PAGE_SIZE = 64 * 1024;             // 64KB
 
     /* A Chunk will store many page, each page will be used for One specified allocated size */
@@ -169,7 +263,7 @@ namespace woomem_cppimpl
         1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824,
 
         // Large page groups
-        65504, 131040, 196576, 262112, 327648, 393184, 458720, 524256, 
+        65504, 131040, 196576, 262112, 327648, 393184, 458720, 524256,
         589792, 655328, 720864, 786400, 851936, 917472, 983008, 1048544,
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
@@ -391,15 +485,29 @@ namespace woomem_cppimpl
         atomic_uint8_t  m_gc_marked;
 
         uint16_t m_next_alloc_unit_offset;
-
+        WOOMEM_FORCE_INLINE void destroy() noexcept
+        {
+            if (m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_FINALIZER)
+            {
+                g_global_mark_ctx.m_destroyer(
+                    reinterpret_cast<void*>(this + 1),
+                    g_global_mark_ctx.m_user_ctx);
+            }
+        }
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
-            return 0 != m_allocated_status.exchange(0, std::memory_order_relaxed);
+            if (0 != m_allocated_status.exchange(0, std::memory_order_relaxed))
+            {
+                destroy();
+                return true;
+            }
+            return false;
         }
         WOOMEM_FORCE_INLINE void fast_free_unit_manually() noexcept
         {
             assert(1 == m_allocated_status.load(std::memory_order_relaxed));
             m_allocated_status.store(0, std::memory_order_relaxed);
+            destroy();
         }
         WOOMEM_FORCE_INLINE void init_unit_head() noexcept
         {
@@ -1261,9 +1369,16 @@ namespace woomem_cppimpl
 
 using namespace woomem_cppimpl;
 
-void woomem_init(void)
+void woomem_init(
+    woomem_UserContext user_ctx,
+    woomem_MarkCallbackFunc marker,
+    woomem_DestroyCallbackFunc destroyer)
 {
     assert(Chunk::g_current_chunk.load(std::memory_order_acquire) == nullptr);
+
+    g_global_mark_ctx.m_user_ctx = user_ctx;
+    g_global_mark_ctx.m_marker = marker;
+    g_global_mark_ctx.m_destroyer = destroyer;
 
     Chunk::g_current_chunk.store(
         Chunk::create_new_chunk(), std::memory_order_release);
