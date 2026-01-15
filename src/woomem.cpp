@@ -58,7 +58,7 @@ namespace woomem_cppimpl
 
     constexpr size_t LARGE_SPACE_HEAD_SIZE = 32;        // 32 Bytes header for large space
 
-    constexpr size_t MOST_LARGE_UNIT_SIZE = 8 * PAGE_SIZE - LARGE_SPACE_HEAD_SIZE;
+    constexpr size_t MOST_LARGE_UNIT_SIZE = 16 * PAGE_SIZE - LARGE_SPACE_HEAD_SIZE;
 
     constexpr uint8_t NEW_BORN_GC_AGE = 15;
 
@@ -97,6 +97,14 @@ namespace woomem_cppimpl
         LARGE_PAGES_6,
         LARGE_PAGES_7,
         LARGE_PAGES_8,
+        LARGE_PAGES_9,
+        LARGE_PAGES_10,
+        LARGE_PAGES_11,
+        LARGE_PAGES_12,
+        LARGE_PAGES_13,
+        LARGE_PAGES_14,
+        LARGE_PAGES_15,
+        LARGE_PAGES_16,
 
         TOTAL_GROUP_COUNT,
 
@@ -137,11 +145,19 @@ namespace woomem_cppimpl
         6,
         7,
         8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
     };
     static_assert(
         PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_1] == 1
         && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_2] == 2
-        && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_8] == 8,
+        && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_16] == 16,
         "PAGE_GROUP_NEED_PAGE_COUNTS must be correct.");
 
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
