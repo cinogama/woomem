@@ -258,7 +258,45 @@ void bench_batch_alloc_free(void)
 // ============================================================================
 void bench_large_sizes(void)
 {
+    printf("\n=== Large Object Allocation Benchmark ===\n");
+    printf("Testing sizes from 21824 to 524256 bytes\n\n");
 
+    // 定义大对象测试的大小范围
+    size_t large_sizes[] = {21824, 32768, 65536, 131072, 262144, 524256};
+    int num_sizes = sizeof(large_sizes) / sizeof(large_sizes[0]);
+    int large_iterations = ITERATIONS / 100;  // 大对象测试减少迭代次数
+
+    Timer t;
+    double woomem_time, malloc_time;
+
+    for (int s = 0; s < num_sizes; ++s) {
+        size_t size = large_sizes[s];
+        printf("Size: %zu bytes (%d iterations):\n", size, large_iterations);
+
+        // woomem
+        timer_start(&t);
+        for (int i = 0; i < large_iterations; ++i) {
+            void* p = woomem_alloc_normal(size);
+            use_pointer(p);
+            woomem_free(p);
+        }
+        woomem_time = timer_elapsed_ms(&t);
+
+        // malloc
+        timer_start(&t);
+        for (int i = 0; i < large_iterations; ++i) {
+            void* p = malloc(size);
+            use_pointer(p);
+            free(p);
+        }
+        malloc_time = timer_elapsed_ms(&t);
+
+        printf("  woomem: %.2f ms (%.2f K ops/sec)\n",
+               woomem_time, large_iterations / woomem_time);
+        printf("  malloc:  %.2f ms (%.2f K ops/sec)\n",
+               malloc_time, large_iterations / malloc_time);
+        printf("  Speedup: %.2fx\n\n", malloc_time / woomem_time);
+    }
 }
 
 // ============================================================================
