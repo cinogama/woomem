@@ -167,6 +167,10 @@ namespace woomem_cppimpl
 
         // Medium page groups
         1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824,
+
+        // Large page groups
+        65504, 131040, 196576, 262112, 327648, 393184, 458720, 524256, 
+        589792, 655328, 720864, 786400, 851936, 917472, 983008, 1048544,
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
@@ -1298,12 +1302,7 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
 
 /* OPTIONAL */ void* woomem_realloc(void* ptr, size_t new_size)
 {
-    // 特殊情况处理
-    if (WOOMEM_UNLIKELY(ptr == nullptr))
-    {
-        // ptr 为 nullptr 时，等同于 alloc
-        return woomem_alloc_normal(new_size);
-    }
+    assert(ptr != nullptr);
 
     UnitHead* const old_unit_head = reinterpret_cast<UnitHead*>(ptr) - 1;
     Page* const old_page = old_unit_head->m_parent_page;
@@ -1325,7 +1324,6 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
         {
             return ptr;
         }
-
         // 差距较大时，进行缩小以节省内存
     }
 
@@ -1343,16 +1341,9 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
     }
 
     // 获取旧的实际分配大小
-    const size_t old_unit_size = (old_group_type < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT)
+    const size_t old_unit_size = (old_group_type < PageGroupType::HUGE)
         ? UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[old_group_type]
-        : 0; // LARGE 类型暂不支持
-
-    // 如果是 LARGE 类型，暂时使用简单策略（分配+复制+释放）
-    if (WOOMEM_UNLIKELY(old_group_type == PageGroupType::HUGE))
-    {
-        // TODO: 实现 LARGE 类型的 realloc
-        abort();
-    }
+        : 0; // HUGE 类型暂不支持
 
     // 复制数据：复制 min(old_unit_size, new_size) 字节
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
