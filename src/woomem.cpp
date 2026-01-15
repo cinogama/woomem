@@ -456,14 +456,11 @@ namespace woomem_cppimpl
 
         PageGroupType m_page_belong_to_group;
 
-        // m_free_times 将在 m_next_alloc_unit_head_offset 耗尽之后重设，
-        // 然后检查 m_freed_unit_head_offset，如果页面彻底耗尽，没有空余
-        // 单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
+        // 如果页面彻底耗尽，没有空余单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
         // 
         // m_abondon_page_flag 将在页面被抛弃时设置
 
         atomic_uint8_t  m_abondon_page_flag;
-        atomic_uint16_t m_free_times;
 
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
@@ -535,7 +532,6 @@ namespace woomem_cppimpl
             m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
             m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
-            m_page_head.m_free_times.store(0, std::memory_order_relaxed);
             m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
 
             const size_t unit_take_size_unit =
@@ -601,19 +597,11 @@ namespace woomem_cppimpl
                 // Still have unit to alloc.
                 return true;
 
-            // Reset free times count.
-            // NOTE: m_free_times must happend before m_freed_unit_head_offset.
-            //      or m_free_time might missing count.
-            if (0 != m_page_head.m_free_times.exchange(0, std::memory_order_acq_rel))
+            const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
+                0, std::memory_order_acq_rel);
+
+            if (free_list != 0)
             {
-                // Make sure `m_page_head` store happend before load of `m_freed_unit_head_offset`.
-                // NOTE: m_freed_unit_head_offset might be modified by other threads.
-                //      we need to exchange it with 0 first.
-                const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
-                    0, std::memory_order_acq_rel);
-
-                assert(free_list != 0);
-
                 m_page_head.m_next_alloc_unit_head_offset = free_list;
                 return true;
             }
@@ -645,11 +633,6 @@ namespace woomem_cppimpl
             {
                 WOOMEM_PAUSE();
             }
-
-            // Count for page reuses.
-            // NOTE: Use release order to make sure count operation always happend 
-            //      after the free operation.
-            (void)m_page_head.m_free_times.fetch_add(1, std::memory_order_release);
         }
         void free_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
         {
@@ -681,7 +664,6 @@ namespace woomem_cppimpl
         {
             m_page_head.m_page_belong_to_group = group_type;
             m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
-            m_page_head.m_free_times.store(0, std::memory_order_relaxed);
 
             m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
             m_page_head.m_next_alloc_unit_head_offset = 0;
