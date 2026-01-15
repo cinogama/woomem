@@ -161,7 +161,6 @@ namespace woomem_cppimpl
     constexpr size_t SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE =
         (MAX_SMALL_UNIT_SIZE + 7) / 8 + 1;
 
-    // 优化：将查找表按 cache line 对齐，减少 cache miss
     constexpr PageGroupType SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE] =
     {
         SMALL_8,
@@ -303,12 +302,8 @@ namespace woomem_cppimpl
     WOOMEM_FORCE_INLINE PageGroupType get_page_group_type_for_size(size_t size) noexcept
     {
         // 快速路径：小于等于 1024 字节使用查找表
-        // 使用无分支的方式：先计算索引，再检查边界
-        const size_t lookup_index = (size + 7) >> 3;
-
-        if (WOOMEM_LIKELY(lookup_index < SMALL_UNIT_FAST_LOOKUP_TABLE_SIZE))
-            return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[lookup_index];
-
+        if (WOOMEM_LIKELY(size < MAX_SMALL_UNIT_SIZE))
+            return SMALL_PAGE_GROUPS_FAST_LOOKUP_FOR_EACH_8B[(size + 7) >> 3];
         if (size <= 1440)
             return MIDIUM_1440;
         if (size <= 2168)
@@ -335,9 +330,15 @@ namespace woomem_cppimpl
     }
 
     union Page;
+    struct LargePageUnitHead;
+
     struct PageHead
     {
-        Page* m_next_page;
+        union
+        {
+            Page* m_next_page;
+            LargePageUnitHead* m_next_large_unit;
+        };
 
         PageGroupType m_page_belong_to_group;
 
@@ -365,7 +366,7 @@ namespace woomem_cppimpl
 
         uint8_t         m_alloc_timing : 4;
         uint8_t /* woomem_GCUnitType */
-                        m_gc_type : 4;
+            m_gc_type : 4;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
@@ -534,9 +535,8 @@ namespace woomem_cppimpl
 
         static void free_page_unit_asyncly(void* valid_page_unit)
         {
-            UnitHead* unit_head =
-                reinterpret_cast<UnitHead*>(
-                    reinterpret_cast<char*>(valid_page_unit) - sizeof(UnitHead));
+            UnitHead* const unit_head =
+                reinterpret_cast<UnitHead*>(valid_page_unit) - 1;
 
             unit_head->m_parent_page->free_unit_in_this_page_asyncly(unit_head);
         }
@@ -666,12 +666,8 @@ namespace woomem_cppimpl
                     reinterpret_cast<Page*>(new_alloc_page)->reinit_page_with_group(
                         page_group);
                 else
-                {
                     reinterpret_cast<LargePageUnitHead*>(new_alloc_page)->init_for_large_page_unit(
                         page_group);
-
-                    // Init multi page flags;
-                }
 
                 // Wait until other threads finish committing.
                 do
@@ -820,7 +816,7 @@ namespace woomem_cppimpl
 
         // 用于储存可分配的大对象和巨型对象实例，注意，TOTAL_GROUP_COUNT 的前 
         // FAST_AND_MIDIUM_GROUP_COUNT 项并不使用，仅作占位（避免每次都减去这些值）。
-        atomic<Page*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
+        atomic<LargePageUnitHead*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
 
         // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
         // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
@@ -866,6 +862,57 @@ namespace woomem_cppimpl
             {
                 WOOMEM_PAUSE();
             }
+        }
+
+        void free_large_unit_asyncly(void* large_unit) noexcept
+        {
+            LargePageUnitHead* large_unit_head =
+                reinterpret_cast<LargePageUnitHead*>(large_unit) - 1;
+
+            auto& large_unit_list = m_free_large_unit_list[
+                large_unit_head->m_page_head.m_page_belong_to_group];
+
+            large_unit_head->m_page_head.m_next_large_unit =
+                large_unit_list.load(std::memory_order_relaxed);
+            while (!large_unit_list.compare_exchange_weak(
+                large_unit_head->m_page_head.m_next_large_unit,
+                large_unit_head,
+                std::memory_order_release,
+                std::memory_order_relaxed))
+            {
+                WOOMEM_PAUSE();
+            }
+        }
+        /* OPTIONAL */ void* try_alloc_large_unit(PageGroupType group_type) noexcept
+        {
+            auto& large_unit_list = m_free_large_unit_list[group_type];
+            LargePageUnitHead* free_large_unit =
+                large_unit_list.load(std::memory_order_acquire);
+            while (free_large_unit != nullptr)
+            {
+                if (large_unit_list.compare_exchange_weak(
+                    free_large_unit,
+                    free_large_unit->m_page_head.m_next_large_unit,
+                    std::memory_order_acq_rel,
+                    std::memory_order_acquire))
+                {
+                    // Successfully got the large unit
+                    free_large_unit->m_page_head.m_next_large_unit = nullptr;
+                    return 1 + &free_large_unit->m_unit_head;
+                }
+                // CAS failed, free_large_unit is updated to current value, retry
+                WOOMEM_PAUSE();
+            }
+            // No free large unit in pool, allocate a new one from Chunk
+            void* new_large_unit = Chunk::allocate_new_page(group_type);
+            if (WOOMEM_LIKELY(new_large_unit != nullptr))
+            {
+                LargePageUnitHead* large_unit_head =
+                    reinterpret_cast<LargePageUnitHead*>(new_large_unit);
+
+                return 1 + &large_unit_head->m_unit_head;
+            }
+            return nullptr;
         }
     };
     GlobalPageCollection g_global_page_collection{};
@@ -976,8 +1023,22 @@ namespace woomem_cppimpl
             {
                 assert(unit_size < PageGroupType::HUGE);
 
-                // TODO: Large alloc
-                abort();
+                void* const allocated_unit =
+                    g_global_page_collection.try_alloc_large_unit(alloc_group);
+
+                if (WOOMEM_LIKELY(allocated_unit != nullptr))
+                {
+                    UnitHead* const allocated_unit_head =
+                        reinterpret_cast<UnitHead*>(allocated_unit) - 1;
+
+                    assert(allocated_unit_head->m_parent_page == nullptr);
+                    assert(0 == allocated_unit_head->m_allocated_status.load(
+                        std::memory_order_relaxed));
+
+                    if (WOOMEM_LIKELY(allocated_unit != nullptr))
+                        init_allocated_unit(allocated_unit_head, unit_type_mask);
+                }
+                return allocated_unit;
             }
             else
             {
@@ -1058,21 +1119,40 @@ namespace woomem_cppimpl
         WOOMEM_FORCE_INLINE void free(void* unit) noexcept
         {
             UnitHead* const freeing_unit_head =
-                reinterpret_cast<UnitHead*>(
-                    reinterpret_cast<char*>(unit) - sizeof(UnitHead));
+                reinterpret_cast<UnitHead*>(unit) - 1;
 
-            // 获取 page group 类型
-            const PageGroupType group_type =
-                freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group;
-            auto& group = m_current_allocating_page_for_group[group_type];
+            if (WOOMEM_LIKELY(freeing_unit_head->m_parent_page != nullptr))
+            {
+                // 获取 page group 类型
+                const PageGroupType group_type =
+                    freeing_unit_head->m_parent_page->m_page_head.m_page_belong_to_group;
+                auto& group = m_current_allocating_page_for_group[group_type];
 
-            // 优化：使用快速释放路径（避免 atomic exchange，假设同一线程分配和释放）
-            freeing_unit_head->fast_free_unit_manually();
+                // 优化：使用快速释放路径（避免 atomic exchange，假设同一线程分配和释放）
+                freeing_unit_head->fast_free_unit_manually();
 
-            // 将释放的单元加入本地空闲列表
-            *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
-            group.m_free_unit_head = freeing_unit_head;
-            ++group.m_free_unit_count;
+                // 将释放的单元加入本地空闲列表
+                *reinterpret_cast<UnitHead**>(unit) = group.m_free_unit_head;
+                group.m_free_unit_head = freeing_unit_head;
+                ++group.m_free_unit_count;
+            }
+            else
+            {
+                LargePageUnitHead* const large_unit_head =
+                    reinterpret_cast<LargePageUnitHead*>(freeing_unit_head) - 1;
+
+                if (WOOMEM_LIKELY(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE))
+                {
+                    // 大对象，返回到全局大对象池
+                    g_global_page_collection.free_large_unit_asyncly(large_unit_head + 1);
+                }
+                else
+                {
+                    // HUGE 对象，直接释放内存
+                    // TODO;
+                    abort();
+                }
+            }
         }
 
         WOOMEM_NOINLINE bool lazy_init_group(PageGroupType group_type) noexcept
