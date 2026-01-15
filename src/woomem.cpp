@@ -10,6 +10,7 @@
 #include <new>
 #include <vector>
 #include <algorithm>
+#include <map>
 
 using namespace std;
 
@@ -156,6 +157,8 @@ namespace woomem_cppimpl
 
     constexpr uint8_t NEW_BORN_GC_AGE = 15;
 
+    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
+
     enum PageGroupType : uint8_t
     {
         SMALL_8,
@@ -202,7 +205,6 @@ namespace woomem_cppimpl
 
         TOTAL_GROUP_COUNT,
 
-        // >= 64MB
         HUGE = TOTAL_GROUP_COUNT,
     };
     constexpr size_t PAGE_GROUP_NEED_PAGE_COUNTS[] =
@@ -457,9 +459,7 @@ namespace woomem_cppimpl
         PageGroupType m_page_belong_to_group;
 
         // 如果页面彻底耗尽，没有空余单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
-        // 
         // m_abondon_page_flag 将在页面被抛弃时设置
-
         atomic_uint8_t  m_abondon_page_flag;
 
         atomic_uint16_t m_freed_unit_head_offset;
@@ -672,6 +672,20 @@ namespace woomem_cppimpl
             m_unit_head.init_unit_head();
         }
     };
+
+    struct Chunk;
+
+    // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
+    //       how to handle that case.
+    class AddrToBlockFastLookupTable
+    {
+        RWSpin m_rwspin;
+        map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
+
+        void add_new_chunk(Chunk* new_chunk_instance) noexcept;
+        // void add_huge_unit(..) noexcept;
+    };
+    AddrToBlockFastLookupTable g_addr_to_block_lookup_table{};
 
     struct Chunk
     {
@@ -915,9 +929,19 @@ namespace woomem_cppimpl
         }
     };
 
-    namespace gc
+    void AddrToBlockFastLookupTable::add_new_chunk(Chunk* new_chunk_instance) noexcept
     {
-        atomic_uint8_t g_current_gc_timing{ 0 };
+        m_rwspin.lock();
+        {
+            auto result = m_chunk_map.insert(
+                make_pair(
+                    new_chunk_instance->m_reserved_address_begin,
+                    new_chunk_instance));
+
+            (void)result;
+            assert(result.second);
+        }
+        m_rwspin.unlock();
     }
 
     struct GlobalPageCollection
@@ -1026,8 +1050,6 @@ namespace woomem_cppimpl
         }
     };
     GlobalPageCollection g_global_page_collection{};
-
-    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
 
     struct ThreadLocalPageCollection
     {
