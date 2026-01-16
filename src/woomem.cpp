@@ -1,6 +1,7 @@
 #include "woomem.h"
 #include "woomem_os_mmap.h"
 
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cassert>
@@ -146,7 +147,11 @@ namespace woomem_cppimpl
     /* A Chunk will store many page, each page will be used for One specified allocated size */
     constexpr size_t CHUNK_SIZE = 128 * 1024 * 1024;    // 128MB
 
+    constexpr size_t PAGE_COUNT_PER_CHUNK = CHUNK_SIZE / PAGE_SIZE;
+
     constexpr size_t CARDTABLE_SIZE_PER_BIT = 512;      // 512 Bytes per bit
+
+    constexpr size_t CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK = CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 8;
 
     constexpr size_t BASE_ALIGNMENT = 8;                // 8 Bytes
 
@@ -678,6 +683,7 @@ namespace woomem_cppimpl
         }
     };
 
+
     struct Chunk
     {
         Chunk* m_last_chunk;
@@ -685,23 +691,20 @@ namespace woomem_cppimpl
         std::atomic_size_t m_next_commiting_page_count;
         std::atomic_size_t m_commited_page_count;
 
+        atomic_uint8_t* const m_cardtable /* same as virtual address begin */;
         Page* const m_reserved_address_begin;
         Page* const m_reserved_address_end;
 
-        // std::atomic_uint64_t m_cardtable[CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 64];
-        // uint8_t m_multi_page_unit_flags[CHUNK_SIZE / PAGE_SIZE];
-
-        static_assert(std::atomic_uint64_t::is_always_lock_free,
-            "atomic_uint64_t must be lock free for performance");
+        static_assert(std::atomic_uint8_t::is_always_lock_free,
+            "atomic_uint8_t must be lock free for m_cardtable");
 
         Chunk(void* reserved_address) noexcept
             : m_last_chunk(nullptr)
             , m_next_commiting_page_count{ 0 }
             , m_commited_page_count{ 0 }
-            , m_reserved_address_begin(reinterpret_cast<Page*>(reserved_address))
-            , m_reserved_address_end(reinterpret_cast<Page*>(
-                reinterpret_cast<uint8_t*>(reserved_address) + CHUNK_SIZE))
-            // , m_cardtable{}
+            , m_cardtable(reinterpret_cast<atomic_uint8_t*>(reserved_address))
+            , m_reserved_address_begin(reinterpret_cast<Page*>(m_cardtable + CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK))
+            , m_reserved_address_end(m_reserved_address_begin + PAGE_COUNT_PER_CHUNK)
         {
             assert(reserved_address != nullptr);
         }
@@ -717,18 +720,15 @@ namespace woomem_cppimpl
             const size_t commited_page_count =
                 m_commited_page_count.load(std::memory_order_relaxed);
 
-            for (size_t i = 0; i < commited_page_count; ++i)
-            {
-                const int decommit_status = woomem_os_decommit_memory(
-                    &m_reserved_address_begin[i],
-                    PAGE_SIZE);
-                assert(decommit_status == 0);
-                (void)decommit_status;
-            }
+            const int decommit_status = woomem_os_decommit_memory(
+                m_cardtable,
+                CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK + commited_page_count * PAGE_SIZE);
+            assert(decommit_status == 0);
+            (void)decommit_status;
 
             const int release_status = woomem_os_release_memory(
-                m_reserved_address_begin,
-                CHUNK_SIZE);
+                m_cardtable,
+                CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK + CHUNK_SIZE);
             assert(release_status == 0);
             (void)release_status;
         }
@@ -874,15 +874,22 @@ namespace woomem_cppimpl
                 return nullptr;
             }
 
-            void* reserved_address = woomem_os_reserve_memory(CHUNK_SIZE);
-            if (WOOMEM_UNLIKELY(reserved_address == nullptr))
+            void* const reserved_address =
+                woomem_os_reserve_memory(CHUNK_SIZE + CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK);
+
+            if (WOOMEM_LIKELY(
+                reserved_address != nullptr
+                && 0 == woomem_os_commit_memory(reserved_address, CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK)))
             {
-                // Cannot reserve virtual address for new chunk.
-                free(chunk_storage);
-                return nullptr;
+                return new (chunk_storage) Chunk(reserved_address);
             }
 
-            return new (chunk_storage) Chunk(reserved_address);
+            // Cannot reserve virtual address or failed to commit basic cardtable for new chunk.
+            if (reserved_address != nullptr)
+                (void)woomem_os_release_memory(reserved_address, CHUNK_SIZE + CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK);
+
+            free(chunk_storage);
+            return nullptr;
         }
     };
 
@@ -1404,6 +1411,20 @@ void woomem_init(
 {
     assert(g_global_page_collection.m_current_chunk.load(
         std::memory_order_acquire) == nullptr);
+
+    const size_t sys_mem_page_size = woomem_os_page_size();
+    if (PAGE_SIZE % sys_mem_page_size != 0)
+    {
+        fprintf(stderr,
+            "WOOMEM: Page size error. Alignment with the system page size is required.");
+        abort();
+    }
+    if (CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK % sys_mem_page_size != 0)
+    {
+        fprintf(stderr,
+            "WOOMEM: Card table size error. Alignment with the system page size is required.");
+        abort();
+    }
 
     g_global_mark_ctx.m_user_ctx = user_ctx;
     g_global_mark_ctx.m_marker = marker;
