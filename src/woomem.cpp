@@ -1382,7 +1382,8 @@ void woomem_init(
     woomem_MarkCallbackFunc marker,
     woomem_DestroyCallbackFunc destroyer)
 {
-    assert(Chunk::g_current_chunk.load(std::memory_order_acquire) == nullptr);
+    assert(g_global_page_collection.m_current_chunk.load(
+        std::memory_order_acquire) == nullptr);
 
     g_global_mark_ctx.m_user_ctx = user_ctx;
     g_global_mark_ctx.m_marker = marker;
