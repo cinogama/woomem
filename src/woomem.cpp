@@ -452,7 +452,7 @@ namespace woomem_cppimpl
     union Page;
     struct LargePageUnitHead;
 
-    struct PageHead
+    struct alignas(16) PageHead
     {
         union
         {
@@ -475,10 +475,10 @@ namespace woomem_cppimpl
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
     };
-    static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 8,
+    static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 16,
         "PageHead size and alignment must be correct.");
 
-    struct UnitHead
+    struct alignas(16) UnitHead
     {
         /* Used for user free. */
         Page* m_parent_page;
@@ -525,7 +525,7 @@ namespace woomem_cppimpl
                 WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
         }
     };
-    static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
+    static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 16,
         "UnitHead size and alignment must be correct.");
 
     union Page
@@ -682,7 +682,8 @@ namespace woomem_cppimpl
             m_unit_head.init_unit_head();
         }
     };
-
+    static_assert(sizeof(LargePageUnitHead) == 32,
+        "LargePageUnitHead size must be correct.");
 
     struct Chunk
     {
@@ -901,8 +902,16 @@ namespace woomem_cppimpl
             | HugeUnitHead   LargePageUnitHead |        |             |
         */
 
-        size_t m_fact_unit_size;
-        // std::atomic_uint64_t* m_cardtable;
+        size_t                  m_fact_unit_size; /* used for realloc */
+        atomic_uint8_t*         m_cardtable; /* point to body end */
+
+        LargePageUnitHead       m_large_page_unit_head;
+        /* body begin here. */
+
+        //static HugeUnitHead* alloc_huge_unit(size_t unit_size) noexcept
+        //{
+            // Alloc
+        //}
     };
 
     // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
@@ -1116,14 +1125,18 @@ namespace woomem_cppimpl
             UnitHead* allocated_unit,
             uint8_t /* 4bits */ unit_type_mask) noexcept
         {
-            // 使用位字段合并写入，减少内存访问次数
-            // m_alloc_timing(4bit) + m_gc_type(4bit) 合并为一个字节
             allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
             allocated_unit->m_gc_type = unit_type_mask;
             allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
             // 使用 relaxed 因为 m_allocated_status 会使用 release 保证可见性
             allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+
             // 最后设置 allocated_status，使用 release 确保之前的写入对其他线程可见
+            // 
+            // NOTE: 如果不使用 release 序，GC线程可能会在观测到 m_allocated_status 的同时
+            //      无法正确读取到分配的元数据；这可能导致 GC 错误判断单元的分配时机导致错误
+            //      释放
+            //
             allocated_unit->m_allocated_status.store(1, std::memory_order_release);
         }
 
