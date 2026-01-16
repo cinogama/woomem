@@ -673,23 +673,9 @@ namespace woomem_cppimpl
         }
     };
 
-    struct Chunk;
-
-    // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
-    //       how to handle that case.
-    class AddrToBlockFastLookupTable
-    {
-        RWSpin m_rwspin;
-        map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
-
-        void add_new_chunk(Chunk* new_chunk_instance) noexcept;
-        // void add_huge_unit(..) noexcept;
-    };
-    AddrToBlockFastLookupTable g_addr_to_block_lookup_table{};
-
     struct Chunk
     {
-        static atomic<Chunk*> g_current_chunk;
+
 
         Chunk* m_last_chunk;
 
@@ -879,24 +865,53 @@ namespace woomem_cppimpl
                 return nullptr;
             }
 
-            Chunk* new_chunk = new (chunk_storage) Chunk(reserved_address);
-            new_chunk->m_last_chunk = g_current_chunk.load(std::memory_order_acquire);
-
-            while (!g_current_chunk.compare_exchange_weak(
-                new_chunk->m_last_chunk,
-                new_chunk,
-                std::memory_order_release,
-                std::memory_order_acquire))
-            {
-                WOOMEM_PAUSE();
-            }
-            return new_chunk;
+            return new (chunk_storage) Chunk(reserved_address);
         }
+    };
 
-        static /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
+
+    // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
+    //       how to handle that case.
+    class AddrToBlockFastLookupTable
+    {
+        RWSpin m_rwspin;
+        map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
+
+        void add_new_chunk(Chunk* new_chunk_instance) noexcept
+        {
+            m_rwspin.lock();
+            {
+                auto result = m_chunk_map.insert(
+                    make_pair(
+                        new_chunk_instance->m_reserved_address_begin,
+                        new_chunk_instance));
+
+                (void)result;
+                assert(result.second);
+            }
+            m_rwspin.unlock();
+        }
+        // void add_huge_unit(..) noexcept;
+    };
+
+    struct GlobalPageCollection
+    {
+        atomic<Chunk*> m_current_chunk;
+        AddrToBlockFastLookupTable m_addr_to_chunk_table;
+
+        atomic<Page*> m_free_group_page_list[FAST_AND_MIDIUM_GROUP_COUNT];
+
+        // 用于储存可分配的大对象和巨型对象实例，注意，TOTAL_GROUP_COUNT 的前 
+        // FAST_AND_MIDIUM_GROUP_COUNT 项并不使用，仅作占位（避免每次都减去这些值）。
+        atomic<LargePageUnitHead*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
+
+        // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
+        // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
+
+        /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
             Chunk* current_chunk =
-                g_current_chunk.load(std::memory_order_relaxed);
+                m_current_chunk.load(std::memory_order_relaxed);
 
             do
             {
@@ -911,11 +926,20 @@ namespace woomem_cppimpl
 
                     if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                     {
-                        current_chunk = create_new_chunk();
+                        current_chunk = Chunk::create_new_chunk();
 
                         if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                             // Failed to alloc chunk..
                             return nullptr;
+
+                        while (!m_current_chunk.compare_exchange_weak(
+                            current_chunk->m_last_chunk,
+                            current_chunk,
+                            std::memory_order_release,
+                            std::memory_order_acquire))
+                        {
+                            WOOMEM_PAUSE();
+                        }
                     }
                     continue;
                 }
@@ -927,33 +951,6 @@ namespace woomem_cppimpl
             // Never reach here.
             abort();
         }
-    };
-
-    void AddrToBlockFastLookupTable::add_new_chunk(Chunk* new_chunk_instance) noexcept
-    {
-        m_rwspin.lock();
-        {
-            auto result = m_chunk_map.insert(
-                make_pair(
-                    new_chunk_instance->m_reserved_address_begin,
-                    new_chunk_instance));
-
-            (void)result;
-            assert(result.second);
-        }
-        m_rwspin.unlock();
-    }
-
-    struct GlobalPageCollection
-    {
-        atomic<Page*> m_free_group_page_list[FAST_AND_MIDIUM_GROUP_COUNT];
-
-        // 用于储存可分配的大对象和巨型对象实例，注意，TOTAL_GROUP_COUNT 的前 
-        // FAST_AND_MIDIUM_GROUP_COUNT 项并不使用，仅作占位（避免每次都减去这些值）。
-        atomic<LargePageUnitHead*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
-
-        // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
-        // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
 
         /* OPTIONAL */ Page* try_get_free_page(PageGroupType group_type) noexcept
         {
@@ -978,7 +975,7 @@ namespace woomem_cppimpl
             }
 
             // No free page in pool, allocate a new one from Chunk
-            return reinterpret_cast<Page*>(Chunk::allocate_new_page(group_type));
+            return reinterpret_cast<Page*>(allocate_new_page(group_type));
         }
         void return_free_page(Page* freeing_page) noexcept
         {
@@ -1038,7 +1035,7 @@ namespace woomem_cppimpl
                 WOOMEM_PAUSE();
             }
             // No free large unit in pool, allocate a new one from Chunk
-            void* new_large_unit = Chunk::allocate_new_page(group_type);
+            void* new_large_unit = allocate_new_page(group_type);
             if (WOOMEM_LIKELY(new_large_unit != nullptr))
             {
                 LargePageUnitHead* large_unit_head =
@@ -1322,7 +1319,7 @@ namespace woomem_cppimpl
         }
         ~ThreadLocalPageCollection()
         {
-            if (Chunk::g_current_chunk.load(std::memory_order_acquire) == nullptr)
+            if (g_global_page_collection.m_current_chunk.load(std::memory_order_acquire) == nullptr)
             {
                 // Already shutdown.
                 return;
@@ -1367,8 +1364,6 @@ namespace woomem_cppimpl
         ThreadLocalPageCollection& operator=(ThreadLocalPageCollection&&) = delete;
     };
     thread_local ThreadLocalPageCollection t_tls_page_collection;
-
-    atomic<Chunk*> Chunk::g_current_chunk;
 }
 
 using namespace woomem_cppimpl;
@@ -1384,13 +1379,13 @@ void woomem_init(
     g_global_mark_ctx.m_marker = marker;
     g_global_mark_ctx.m_destroyer = destroyer;
 
-    Chunk::g_current_chunk.store(
+    g_global_page_collection.m_current_chunk.store(
         Chunk::create_new_chunk(), std::memory_order_release);
 }
 void woomem_shutdown(void)
 {
     Chunk* current_chunk =
-        Chunk::g_current_chunk.load(std::memory_order_acquire);
+        g_global_page_collection.m_current_chunk.load(std::memory_order_acquire);
 
     assert(current_chunk != nullptr);
 
@@ -1405,7 +1400,7 @@ void woomem_shutdown(void)
 
     } while (current_chunk != nullptr);
 
-    Chunk::g_current_chunk.store(
+    g_global_page_collection.m_current_chunk.store(
         nullptr,
         std::memory_order_release);
 }
