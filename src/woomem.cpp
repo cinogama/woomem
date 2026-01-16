@@ -455,6 +455,12 @@ namespace woomem_cppimpl
             LargePageUnitHead* m_next_large_unit;
         };
 
+        // Used for finding chunk head.
+        uint16_t m_page_index_in_chunk;
+
+        static_assert(CHUNK_SIZE / PAGE_SIZE < UINT16_MAX,
+            "Cannot store page index in chunk.");
+
         PageGroupType m_page_belong_to_group;
 
         // 如果页面彻底耗尽，没有空余单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
@@ -474,9 +480,8 @@ namespace woomem_cppimpl
 
         atomic_uint8_t  m_allocated_status; // 0 = freed, 1 = allocated
 
-        uint8_t         m_alloc_timing : 4;
-        uint8_t /* woomem_GCUnitType */
-            m_gc_type : 4;
+        uint8_t         m_alloc_timing;
+        uint8_t /* woomem_GCUnitType */ m_gc_type;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
 
@@ -661,6 +666,7 @@ namespace woomem_cppimpl
 
         void init_for_large_page_unit(PageGroupType group_type)
         {
+            m_page_head.m_next_large_unit = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
             m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
 
@@ -770,11 +776,25 @@ namespace woomem_cppimpl
                 // Init this page.
                 // NOTE: Even we commit multiple pages, only the first page need init.
                 if (page_group < PageGroupType::LARGE_PAGES_1)
-                    reinterpret_cast<Page*>(new_alloc_page)->reinit_page_with_group(
+                {
+                    Page* const now_alloc_page = reinterpret_cast<Page*>(new_alloc_page);
+
+                    now_alloc_page->m_page_head.m_page_index_in_chunk =
+                        static_cast<uint16_t>(now_alloc_page - m_reserved_address_begin);
+                    now_alloc_page->reinit_page_with_group(
                         page_group);
+
+                }
                 else
-                    reinterpret_cast<LargePageUnitHead*>(new_alloc_page)->init_for_large_page_unit(
-                        page_group);
+                {
+                    LargePageUnitHead* const now_alloc_large_unit =
+                        reinterpret_cast<LargePageUnitHead*>(new_alloc_page);
+
+                    now_alloc_large_unit->m_page_head.m_page_index_in_chunk =
+                        static_cast<uint16_t>(
+                            reinterpret_cast<Page*>(new_alloc_page) - m_reserved_address_begin);
+                    now_alloc_large_unit->init_for_large_page_unit(page_group);
+                }
 
                 // Wait until other threads finish committing.
                 do
