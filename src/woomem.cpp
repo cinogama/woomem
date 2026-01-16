@@ -951,6 +951,16 @@ namespace woomem_cppimpl
 
         // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
         // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
+        /*
+        m_huge_units 用于储存当前已经分配出的所有巨大节点，仅GC的释放操作允许从中移除节点
+        GC移除节点前，需要通过原子操作验证节点是否被释放；因为：
+
+        m_freed_huge_units 被用于储存被手动释放的巨大节点，在GC发生之前，这些节点仍然可能
+        在满足特定策略的情况下被重新分配出去。
+        在GC开始时，m_freed_huge_units 将被事先清空，避免 GC的释放与节点的重用同时发生。
+        */
+        atomic<HugeUnitHead*> m_huge_units;
+        atomic<HugeUnitHead*> m_freed_huge_units;
 
         /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
