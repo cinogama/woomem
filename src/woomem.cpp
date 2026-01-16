@@ -117,7 +117,6 @@ namespace woomem_cppimpl
                             break;
 
                         WOOMEM_PAUSE();
-                        prev_status = m_spin_mark.load(std::memory_order_relaxed);
 
                     } while (true);
                 }
@@ -675,8 +674,6 @@ namespace woomem_cppimpl
 
     struct Chunk
     {
-
-
         Chunk* m_last_chunk;
 
         std::atomic_size_t m_next_commiting_page_count;
@@ -869,6 +866,17 @@ namespace woomem_cppimpl
         }
     };
 
+    struct HugeUnitHead
+    {
+        /*
+        LAYOUT:
+            |               Head                | Body   |  CardTable |
+            | HugeUnitHead   LargePageUnitHead |        |             |
+        */
+
+        size_t m_fact_unit_size;
+        // std::atomic_uint64_t* m_cardtable;
+    };
 
     // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
     //       how to handle that case.
@@ -876,8 +884,8 @@ namespace woomem_cppimpl
     {
         RWSpin m_rwspin;
         map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
-
-        void add_new_chunk(Chunk* new_chunk_instance) noexcept
+    public:
+        WOOMEM_FORCE_INLINE void add_new_chunk(Chunk* new_chunk_instance) noexcept
         {
             m_rwspin.lock();
             {
@@ -927,6 +935,7 @@ namespace woomem_cppimpl
                     if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                     {
                         current_chunk = Chunk::create_new_chunk();
+                        m_addr_to_chunk_table.add_new_chunk(current_chunk);
 
                         if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                             // Failed to alloc chunk..
