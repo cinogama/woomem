@@ -620,27 +620,29 @@ int main(int argc, char** argv)
 
     woomem_init(NULL, NULL, NULL);
 
-    // 预热
-    printf("\nWarming up...\n");
-    for (int i = 0; i < 10000; ++i) {
-        void* p = woomem_alloc_normal(64);
-        woomem_free(p);
-        p = malloc(64);
-        free(p);
+    for (;;)
+    {
+        // 预热
+        printf("\nWarming up...\n");
+        for (int i = 0; i < 10000; ++i) {
+            void* p = woomem_alloc_normal(64);
+            woomem_free(p);
+            p = malloc(64);
+            free(p);
+        }
+
+        // 运行各项测试
+        bench_sequential_alloc_free();
+        bench_batch_alloc_free();
+        bench_large_sizes();
+        bench_random_sizes();
+        bench_mixed_pattern();
+
+        // 多线程测试
+        bench_multithread(2);
+        bench_multithread(4);
+        bench_multithread(8);
     }
-
-    // 运行各项测试
-    bench_sequential_alloc_free();
-    bench_batch_alloc_free();
-    bench_large_sizes();
-    bench_random_sizes();
-    bench_mixed_pattern();
-
-    // 多线程测试
-    bench_multithread(2);
-    bench_multithread(4);
-    bench_multithread(8);
-
     woomem_shutdown();
 
     printf("========================================\n");

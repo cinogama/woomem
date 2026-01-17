@@ -4,7 +4,7 @@ include_directories("../include")
 
 # 功能测试
 add_executable(woomem_test 
-    test_main.c)
+    "test_main.cpp")
 
 target_link_libraries(woomem_test 
     PRIVATE woomem

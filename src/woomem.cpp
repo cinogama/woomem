@@ -901,7 +901,7 @@ namespace woomem_cppimpl
             |               Head                | Body   |  CardTable |
             | HugeUnitHead   LargePageUnitHead |        |             |
         */
-        HugeUnitHead*   m_next_huge_unit;
+        HugeUnitHead* m_next_huge_unit;
 
         size_t          m_fact_unit_size; /* used for realloc */
         size_t          m_aligned_unit_size;
@@ -942,6 +942,10 @@ namespace woomem_cppimpl
         RWSpin m_rwspin;
         map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
     public:
+        void reset()noexcept
+        {
+            m_chunk_map.clear();
+        }
         WOOMEM_FORCE_INLINE void add_new_chunk(Chunk* new_chunk_instance) noexcept
         {
             m_rwspin.lock();
@@ -980,6 +984,51 @@ namespace woomem_cppimpl
         因为 HUGE 单元的 CardTable 是独立的
         */
         atomic<HugeUnitHead*> m_huge_units_for_gc_walk_through;
+
+        void reset() noexcept
+        {
+            m_addr_to_chunk_table.reset();
+
+            HugeUnitHead* huge_unit =
+                m_huge_units_for_gc_walk_through.exchange(nullptr, std::memory_order_relaxed);
+
+            while (huge_unit != nullptr)
+            {
+                HugeUnitHead* const current_unit = huge_unit;
+                huge_unit = huge_unit->m_next_huge_unit;
+
+                // Donot invoke destroy function when reset.
+                // 
+                //(void)current_unit->m_large_page_unit_head.m_unit_head.try_free_this_unit_head();
+                free(current_unit);
+            }
+
+            for (auto& free_page_group_page : m_free_group_page_list)
+                free_page_group_page.store(nullptr, std::memory_order_relaxed);
+
+            for (auto& free_large_unit_list : m_free_large_unit_list)
+                m_free_large_unit_list->store(nullptr, std::memory_order_relaxed);
+
+            Chunk* current_chunk =
+                m_current_chunk.load(std::memory_order_acquire);
+
+            assert(current_chunk != nullptr);
+
+            do
+            {
+                Chunk* last_chunk = current_chunk->m_last_chunk;
+
+                current_chunk->~Chunk();
+                free(current_chunk);
+
+                current_chunk = last_chunk;
+
+            } while (current_chunk != nullptr);
+
+            m_current_chunk.store(
+                nullptr,
+                std::memory_order_release);
+        }
 
         /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
@@ -1440,9 +1489,9 @@ namespace woomem_cppimpl
             return true;
         }
 
-        ThreadLocalPageCollection() noexcept
-            : m_alloc_timing{ 0 }
+        void reset() noexcept
         {
+            m_alloc_timing = 0;
             for (PageGroupType t = PageGroupType::SMALL_8;
                 t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
@@ -1454,14 +1503,8 @@ namespace woomem_cppimpl
                 group.m_free_unit_count = 0;
             }
         }
-        ~ThreadLocalPageCollection()
+        void drop() noexcept
         {
-            if (g_global_page_collection.m_current_chunk.load(std::memory_order_acquire) == nullptr)
-            {
-                // Already shutdown.
-                return;
-            }
-
             for (PageGroupType t = PageGroupType::SMALL_8;
                 t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
@@ -1493,6 +1536,19 @@ namespace woomem_cppimpl
                     } while (freeing_page != first_freeing_page);
                 }
             }
+        }
+
+        ThreadLocalPageCollection() noexcept
+        {
+            reset();
+        }
+        ~ThreadLocalPageCollection()
+        {
+            if (g_global_page_collection.m_current_chunk.load(std::memory_order_acquire) == nullptr)
+                // Already shutdown.
+                return;
+
+            drop();
         }
 
         ThreadLocalPageCollection(const ThreadLocalPageCollection&) = delete;
@@ -1536,25 +1592,10 @@ void woomem_init(
 }
 void woomem_shutdown(void)
 {
-    Chunk* current_chunk =
-        g_global_page_collection.m_current_chunk.load(std::memory_order_acquire);
+    t_tls_page_collection.drop();
+    t_tls_page_collection.reset();
 
-    assert(current_chunk != nullptr);
-
-    do
-    {
-        Chunk* last_chunk = current_chunk->m_last_chunk;
-
-        current_chunk->~Chunk();
-        free(current_chunk);
-
-        current_chunk = last_chunk;
-
-    } while (current_chunk != nullptr);
-
-    g_global_page_collection.m_current_chunk.store(
-        nullptr,
-        std::memory_order_release);
+    g_global_page_collection.reset();
 }
 
 /* OPTIONAL */ void* woomem_alloc_normal(size_t size)
@@ -1603,7 +1644,7 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
                     return ptr;
                 }
             }
-            
+
         }
         // 差距较大时，进行缩小以节省内存
     }
