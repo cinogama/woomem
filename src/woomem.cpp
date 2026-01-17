@@ -901,25 +901,26 @@ namespace woomem_cppimpl
             |               Head                | Body   |  CardTable |
             | HugeUnitHead   LargePageUnitHead |        |             |
         */
-        HugeUnitHead* m_next_huge_unit;
+        HugeUnitHead*   m_next_huge_unit;
 
-        size_t                  m_fact_unit_size; /* used for realloc */
+        size_t          m_fact_unit_size; /* used for realloc */
+        size_t          m_aligned_unit_size;
         atomic_uint8_t* m_cardtable; /* point to body end */
 
         LargePageUnitHead       m_large_page_unit_head;
         /* body begin here. */
 
-        void init_huge_unit_head_by_size(size_t unit_size) noexcept
+        WOOMEM_FORCE_INLINE void init_huge_unit_head_by_size(size_t aligned_unit_size) noexcept
         {
             // Align to 1 card table byte size (4k).
-            assert(unit_size % (CARDTABLE_SIZE_PER_BIT * 8) == 0);
+            assert(aligned_unit_size % (CARDTABLE_SIZE_PER_BIT * 8) == 0);
 
-            m_fact_unit_size = unit_size;
+            m_aligned_unit_size = aligned_unit_size;
 
             static_assert(sizeof(atomic_uint8_t) == sizeof(char),
                 "sizeof(atomic_uint8_t) == sizeof(char) expected.");
             m_cardtable =
-                reinterpret_cast<atomic_uint8_t*>(this + 1) + unit_size;
+                reinterpret_cast<atomic_uint8_t*>(this + 1) + aligned_unit_size;
 
             /*
             m_page_index_in_chunk is uselese for HugeUnit.
@@ -930,7 +931,7 @@ namespace woomem_cppimpl
             /*
             Reset cardtable masks.
             */
-            memset(m_cardtable, 0, unit_size / CARDTABLE_SIZE_PER_BIT / 8);
+            memset(m_cardtable, 0, aligned_unit_size / CARDTABLE_SIZE_PER_BIT / 8);
         }
     };
 
@@ -1147,6 +1148,8 @@ namespace woomem_cppimpl
             if (WOOMEM_LIKELY(new_allocated_huge_unit != NULL))
             {
                 new_allocated_huge_unit->init_huge_unit_head_by_size(aligned_alloc_unit_size);
+                new_allocated_huge_unit->m_fact_unit_size = unit_size;
+
                 return new_allocated_huge_unit;
             }
             return nullptr;
@@ -1585,7 +1588,22 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
         // 如果差距小于2级，保持原分配不变（避免内存抖动）
         if (group_diff < 2)
         {
-            return ptr;
+            if (WOOMEM_LIKELY(old_group_type != PageGroupType::HUGE))
+                return ptr;
+            else
+            {
+                // HUGE 单元的尺寸规则和其他单元不大一样，需要特别处理一下
+                HugeUnitHead* const old_huge_unit_head =
+                    reinterpret_cast<HugeUnitHead*>(ptr) - 1;
+
+                if (new_size <= old_huge_unit_head->m_aligned_unit_size)
+                {
+                    // Ok, 足够容纳，跳过
+                    old_huge_unit_head->m_fact_unit_size = new_size;
+                    return ptr;
+                }
+            }
+            
         }
         // 差距较大时，进行缩小以节省内存
     }
@@ -1606,17 +1624,10 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
     // 获取旧的实际分配大小
     const size_t old_unit_size = (old_group_type < PageGroupType::HUGE)
         ? UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[old_group_type]
-        : 0; // HUGE 类型暂不支持
+        : (reinterpret_cast<HugeUnitHead*>(ptr) - 1)->m_fact_unit_size;
 
     // 复制数据：复制 min(old_unit_size, new_size) 字节
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
-
-    // 继承 GC 相关属性（可选：根据需求决定是否继承）
-    UnitHead* const new_unit_head = reinterpret_cast<UnitHead*>(new_ptr) - 1;
-    new_unit_head->m_gc_age = old_unit_head->m_gc_age;
-    new_unit_head->m_gc_marked.store(
-        old_unit_head->m_gc_marked.load(std::memory_order_relaxed),
-        std::memory_order_relaxed);
 
     // 释放旧内存
     woomem_free(ptr);
