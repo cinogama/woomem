@@ -901,17 +901,37 @@ namespace woomem_cppimpl
             |               Head                | Body   |  CardTable |
             | HugeUnitHead   LargePageUnitHead |        |             |
         */
+        HugeUnitHead* m_next_huge_unit;
 
         size_t                  m_fact_unit_size; /* used for realloc */
-        atomic_uint8_t*         m_cardtable; /* point to body end */
+        atomic_uint8_t* m_cardtable; /* point to body end */
 
         LargePageUnitHead       m_large_page_unit_head;
         /* body begin here. */
 
-        //static HugeUnitHead* alloc_huge_unit(size_t unit_size) noexcept
-        //{
-            // Alloc
-        //}
+        void init_huge_unit_head_by_size(size_t unit_size) noexcept
+        {
+            // Align to 1 card table byte size (4k).
+            assert(unit_size % (CARDTABLE_SIZE_PER_BIT * 8) == 0);
+
+            m_fact_unit_size = unit_size;
+
+            static_assert(sizeof(atomic_uint8_t) == sizeof(char),
+                "sizeof(atomic_uint8_t) == sizeof(char) expected.");
+            m_cardtable =
+                reinterpret_cast<atomic_uint8_t*>(this + 1) + unit_size;
+
+            /*
+            m_page_index_in_chunk is uselese for HugeUnit.
+            */
+            /* m_large_page_unit_head.m_page_head.m_page_index_in_chunk = 0 */;
+            m_large_page_unit_head.init_for_large_page_unit(PageGroupType::HUGE);
+
+            /*
+            Reset cardtable masks.
+            */
+            memset(m_cardtable, 0, unit_size / CARDTABLE_SIZE_PER_BIT / 8);
+        }
     };
 
     // TODO: Need impl, and consider if m_chunk_map cannot alloc memory,
@@ -952,15 +972,13 @@ namespace woomem_cppimpl
         // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
         // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
         /*
-        m_huge_units 用于储存当前已经分配出的所有巨大节点，仅GC的释放操作允许从中移除节点
-        GC移除节点前，需要通过原子操作验证节点是否被释放；因为：
+        m_huge_units_for_gc_walk_through 用于储存当前已经分配出的所有巨大节点，在（且
+        仅在）GC的释放操作完成后，由GC线程负责整理此列表，排除所有未被分配的节点。
 
-        m_freed_huge_units 被用于储存被手动释放的巨大节点，在GC发生之前，这些节点仍然可能
-        在满足特定策略的情况下被重新分配出去。
-        在GC开始时，m_freed_huge_units 将被事先清空，避免 GC的释放与节点的重用同时发生。
+        此表仅用于GC标记时，遍历所有尚处于存活状态的巨大节点，然后标记它们的 CardTable。
+        因为 HUGE 单元的 CardTable 是独立的
         */
-        atomic<HugeUnitHead*> m_huge_units;
-        atomic<HugeUnitHead*> m_freed_huge_units;
+        atomic<HugeUnitHead*> m_huge_units_for_gc_walk_through;
 
         /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
@@ -1050,10 +1068,9 @@ namespace woomem_cppimpl
             }
         }
 
-        void free_large_unit_asyncly(void* large_unit) noexcept
+        void free_large_unit_asyncly(LargePageUnitHead* large_unit_head) noexcept
         {
-            LargePageUnitHead* large_unit_head =
-                reinterpret_cast<LargePageUnitHead*>(large_unit) - 1;
+            assert(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE);
 
             auto& large_unit_list = m_free_large_unit_list[
                 large_unit_head->m_page_head.m_page_belong_to_group];
@@ -1099,6 +1116,55 @@ namespace woomem_cppimpl
                 return large_unit_head + 1;
             }
             return nullptr;
+        }
+
+        void free_huge_unit_asyncly(LargePageUnitHead* huge_unit_head)
+        {
+            assert(huge_unit_head->m_page_head.m_page_belong_to_group == PageGroupType::HUGE);
+
+            // Donot free huge unit now, do it in gc work.
+            assert(1 == huge_unit_head->m_unit_head.m_allocated_status.load(
+                std::memory_order_relaxed));
+
+            huge_unit_head->m_unit_head.m_allocated_status.store(
+                0, std::memory_order_relaxed);
+        }
+        /* OPTIONAL */ HugeUnitHead* try_alloc_huge_unit_step1(size_t unit_size) noexcept
+        {
+            const size_t aligned_alloc_unit_size =
+                (unit_size + (CARDTABLE_SIZE_PER_BIT * 8 - 1)) / CARDTABLE_SIZE_PER_BIT * 8;
+
+            HugeUnitHead* const new_allocated_huge_unit =
+                reinterpret_cast<HugeUnitHead*>(
+                    malloc(
+                        // HugeUnitHead
+                        sizeof(HugeUnitHead)
+                        // UnitBody
+                        + aligned_alloc_unit_size
+                        // CardTable
+                        + (aligned_alloc_unit_size / CARDTABLE_SIZE_PER_BIT / 8)));
+
+            if (WOOMEM_LIKELY(new_allocated_huge_unit != NULL))
+            {
+                new_allocated_huge_unit->init_huge_unit_head_by_size(aligned_alloc_unit_size);
+                return new_allocated_huge_unit;
+            }
+            return nullptr;
+        }
+        void commit_huge_unit_into_list_step2(HugeUnitHead* huge_unit)
+        {
+            assert(1 == huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
+                std::memory_order_relaxed));
+
+            huge_unit->m_next_huge_unit = m_huge_units_for_gc_walk_through.load(std::memory_order_relaxed);
+            while (!m_huge_units_for_gc_walk_through.compare_exchange_weak(
+                huge_unit->m_next_huge_unit,
+                huge_unit,
+                std::memory_order_release,
+                std::memory_order_relaxed))
+            {
+                WOOMEM_PAUSE();
+            }
         }
     };
     GlobalPageCollection g_global_page_collection{};
@@ -1223,15 +1289,25 @@ namespace woomem_cppimpl
                     assert(0 == allocated_unit_head->m_allocated_status.load(
                         std::memory_order_relaxed));
 
-                    if (WOOMEM_LIKELY(allocated_unit != nullptr))
-                        init_allocated_unit(allocated_unit_head, unit_type_mask);
+                    init_allocated_unit(allocated_unit_head, unit_type_mask);
                 }
                 return allocated_unit;
             }
             else
             {
-                // TODO: Huge alloc
-                abort();
+                HugeUnitHead* const allocated_huge_unit = g_global_page_collection.try_alloc_huge_unit_step1(unit_size);
+                if (WOOMEM_LIKELY(allocated_huge_unit != nullptr))
+                {
+                    assert(allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_parent_page == nullptr);
+                    assert(0 == allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
+                        std::memory_order_relaxed));
+
+                    init_allocated_unit(
+                        &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
+
+                    g_global_page_collection.commit_huge_unit_into_list_step2(allocated_huge_unit);
+                }
+                return nullptr;
             }
         }
 
@@ -1331,13 +1407,12 @@ namespace woomem_cppimpl
                 if (WOOMEM_LIKELY(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE))
                 {
                     // 大对象，返回到全局大对象池
-                    g_global_page_collection.free_large_unit_asyncly(large_unit_head + 1);
+                    g_global_page_collection.free_large_unit_asyncly(large_unit_head);
                 }
                 else
                 {
                     // HUGE 对象，直接释放内存
-                    // TODO;
-                    abort();
+                    g_global_page_collection.free_huge_unit_asyncly(large_unit_head);
                 }
             }
         }
