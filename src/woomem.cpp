@@ -1168,21 +1168,10 @@ namespace woomem_cppimpl
             return nullptr;
         }
 
-        void free_huge_unit_asyncly(LargePageUnitHead* huge_unit_head)
-        {
-            assert(huge_unit_head->m_page_head.m_page_belong_to_group == PageGroupType::HUGE);
-
-            // Donot free huge unit now, do it in gc work.
-            assert(1 == huge_unit_head->m_unit_head.m_allocated_status.load(
-                std::memory_order_relaxed));
-
-            huge_unit_head->m_unit_head.m_allocated_status.store(
-                0, std::memory_order_relaxed);
-        }
         /* OPTIONAL */ HugeUnitHead* try_alloc_huge_unit_step1(size_t unit_size) noexcept
         {
             const size_t aligned_alloc_unit_size =
-                (unit_size + (CARDTABLE_SIZE_PER_BIT * 8 - 1)) / CARDTABLE_SIZE_PER_BIT * 8;
+                (unit_size + (CARDTABLE_SIZE_PER_BIT * 8 - 1)) & ~(CARDTABLE_SIZE_PER_BIT * 8 - 1);
 
             HugeUnitHead* const new_allocated_huge_unit =
                 reinterpret_cast<HugeUnitHead*>(
@@ -1358,6 +1347,8 @@ namespace woomem_cppimpl
                         &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
 
                     g_global_page_collection.commit_huge_unit_into_list_step2(allocated_huge_unit);
+
+                    return allocated_huge_unit + 1;
                 }
                 return nullptr;
             }
@@ -1461,11 +1452,7 @@ namespace woomem_cppimpl
                     // 大对象，返回到全局大对象池
                     g_global_page_collection.free_large_unit_asyncly(large_unit_head);
                 }
-                else
-                {
-                    // HUGE 对象，直接释放内存
-                    g_global_page_collection.free_huge_unit_asyncly(large_unit_head);
-                }
+                // Or: HUGE 对象，分配标记已经解除；确实的释放操作将由GC负责，此处啥也不做
             }
         }
 
