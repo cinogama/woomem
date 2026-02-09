@@ -1,6 +1,8 @@
 #include "woomem.h"
 #include "woomem_os_mmap.h"
 
+#include "woomem_gc.hpp"
+
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
@@ -49,99 +51,6 @@ using namespace std;
 
 namespace woomem_cppimpl
 {
-    class RWSpin
-    {
-        atomic_uint32_t m_spin_mark;
-        static constexpr uint32_t WRITE_LOCK_MASK = 0x80000000u;
-
-    public:
-        RWSpin() noexcept : m_spin_mark{ 0 } {}
-        RWSpin(const RWSpin&) = delete;
-        RWSpin(RWSpin&&) = delete;
-        RWSpin& operator=(const RWSpin&) = delete;
-        RWSpin& operator=(RWSpin&&) = delete;
-
-        void lock() noexcept
-        {
-            do
-            {
-                uint32_t prev_status =
-                    m_spin_mark.fetch_or(
-                        WRITE_LOCK_MASK,
-                        std::memory_order_acq_rel);
-
-                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
-                {
-                    // Lock acquired, check until all readers are gone.
-                    if (prev_status != 0)
-                    {
-                        // Still have other readers.
-                        do
-                        {
-                            WOOMEM_PAUSE();
-                            prev_status = m_spin_mark.load(std::memory_order_acquire);
-
-                        } while (prev_status != WRITE_LOCK_MASK);
-                    }
-                    break;
-                }
-
-                // Or, someone else is holding the write lock, wait.
-                WOOMEM_PAUSE();
-            } while (true);
-        }
-        void unlock() noexcept
-        {
-            assert(m_spin_mark.load(std::memory_order_relaxed) == WRITE_LOCK_MASK);
-            m_spin_mark.store(0, std::memory_order_release);
-        }
-        void lock_shared() noexcept
-        {
-            do
-            {
-                uint32_t prev_status = m_spin_mark.load(std::memory_order_acquire);
-                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
-                {
-                    // No write lock mask, try to add reader count.
-                    do
-                    {
-                        if (m_spin_mark.compare_exchange_strong(
-                            prev_status,
-                            prev_status + 1,
-                            std::memory_order_release,
-                            std::memory_order_relaxed))
-                            // Ok, acquired shared lock.
-                            return;
-
-                        if (0 != (prev_status & WRITE_LOCK_MASK))
-                            // Write lock mask appeared, roll back.
-                            break;
-
-                        WOOMEM_PAUSE();
-
-                    } while (true);
-                }
-                WOOMEM_PAUSE();
-            } while (true);
-        }
-        void unlock_shared() noexcept
-        {
-            const uint32_t prev_status =
-                m_spin_mark.fetch_sub(1, std::memory_order_release);
-
-            (void)prev_status;
-            assert(0 != (prev_status & ~WRITE_LOCK_MASK));
-        }
-    };
-
-    struct GlobalMarkContext
-    {
-        woomem_UserContext          m_user_ctx;
-        woomem_MarkCallbackFunc     m_marker;
-        woomem_DestroyCallbackFunc  m_destroyer;
-    };
-    GlobalMarkContext g_global_mark_ctx;
-
     constexpr size_t PAGE_SIZE = 64 * 1024;             // 64KB
 
     /* A Chunk will store many page, each page will be used for One specified allocated size */
@@ -162,6 +71,91 @@ namespace woomem_cppimpl
     constexpr uint8_t NEW_BORN_GC_AGE = 15;
 
     constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
+
+    class RWSpin
+    {
+        atomic_uint32_t m_spin_mark;
+        static constexpr uint32_t WRITE_LOCK_MASK = 0x80000000u;
+
+    public:
+        RWSpin() noexcept : m_spin_mark{ 0 } {}
+        RWSpin(const RWSpin&) = delete;
+        RWSpin(RWSpin&&) = delete;
+        RWSpin& operator=(const RWSpin&) = delete;
+        RWSpin& operator=(RWSpin&&) = delete;
+
+        void lock() noexcept
+        {
+            do
+            {
+                uint32_t prev_status =
+                    m_spin_mark.fetch_or(
+                        WRITE_LOCK_MASK,
+                        memory_order::memory_order_acq_rel);
+
+                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
+                {
+                    // Lock acquired, check until all readers are gone.
+                    if (prev_status != 0)
+                    {
+                        // Still have other readers.
+                        do
+                        {
+                            WOOMEM_PAUSE();
+                            prev_status = m_spin_mark.load(memory_order::memory_order_acquire);
+
+                        } while (prev_status != WRITE_LOCK_MASK);
+                    }
+                    break;
+                }
+
+                // Or, someone else is holding the write lock, wait.
+                WOOMEM_PAUSE();
+            } while (true);
+        }
+        void unlock() noexcept
+        {
+            assert(m_spin_mark.load(memory_order::memory_order_relaxed) == WRITE_LOCK_MASK);
+            m_spin_mark.store(0, memory_order::memory_order_release);
+        }
+        void lock_shared() noexcept
+        {
+            do
+            {
+                uint32_t prev_status = m_spin_mark.load(memory_order::memory_order_acquire);
+                if (WOOMEM_LIKELY(0 == (prev_status & WRITE_LOCK_MASK)))
+                {
+                    // No write lock mask, try to add reader count.
+                    do
+                    {
+                        if (m_spin_mark.compare_exchange_strong(
+                            prev_status,
+                            prev_status + 1,
+                            memory_order::memory_order_release,
+                            memory_order::memory_order_relaxed))
+                            // Ok, acquired shared lock.
+                            return;
+
+                        if (0 != (prev_status & WRITE_LOCK_MASK))
+                            // Write lock mask appeared, roll back.
+                            break;
+
+                        WOOMEM_PAUSE();
+
+                    } while (true);
+                }
+                WOOMEM_PAUSE();
+            } while (true);
+        }
+        void unlock_shared() noexcept
+        {
+            const uint32_t prev_status =
+                m_spin_mark.fetch_sub(1, memory_order::memory_order_release);
+
+            (void)prev_status;
+            assert(0 != (prev_status & ~WRITE_LOCK_MASK));
+        }
+    };
 
     enum PageGroupType : uint8_t
     {
@@ -495,14 +489,14 @@ namespace woomem_cppimpl
         {
             if (m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_FINALIZER)
             {
-                g_global_mark_ctx.m_destroyer(
+                gc::g_global_gc_methods.m_destroyer(
                     reinterpret_cast<void*>(this + 1),
-                    g_global_mark_ctx.m_user_ctx);
+                    gc::g_global_gc_methods.m_user_ctx);
             }
         }
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
-            if (0 != m_allocated_status.exchange(0, std::memory_order_relaxed))
+            if (0 != m_allocated_status.exchange(0, memory_order::memory_order_relaxed))
             {
                 destroy();
                 return true;
@@ -511,18 +505,18 @@ namespace woomem_cppimpl
         }
         WOOMEM_FORCE_INLINE void fast_free_unit_manually() noexcept
         {
-            assert(1 == m_allocated_status.load(std::memory_order_relaxed));
-            m_allocated_status.store(0, std::memory_order_relaxed);
+            assert(1 == m_allocated_status.load(memory_order::memory_order_relaxed));
+            m_allocated_status.store(0, memory_order::memory_order_relaxed);
             destroy();
         }
         WOOMEM_FORCE_INLINE void init_unit_head() noexcept
         {
-            m_allocated_status.store(0, std::memory_order_relaxed);
+            m_allocated_status.store(0, memory_order::memory_order_relaxed);
 
             /* unit_head->m_alloc_timing will be set when allocate. */
             m_gc_age = NEW_BORN_GC_AGE;
             m_gc_marked.store(
-                WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+                WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
         }
     };
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 16,
@@ -540,8 +534,8 @@ namespace woomem_cppimpl
 
             m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
-            m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
-            m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
+            m_page_head.m_abondon_page_flag.store(0, memory_order::memory_order_relaxed);
+            m_page_head.m_freed_unit_head_offset.store(0, memory_order::memory_order_relaxed);
 
             const size_t unit_take_size_unit =
                 UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[group_type] + sizeof(UnitHead);
@@ -581,7 +575,7 @@ namespace woomem_cppimpl
                     reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
 
                 assert(0 == allocating_unit_head->m_allocated_status.load(
-                    std::memory_order_relaxed));
+                    memory_order::memory_order_relaxed));
 
                 /*
                 ATTENTION: Attribute and allocated flag will be set after
@@ -607,7 +601,7 @@ namespace woomem_cppimpl
                 return true;
 
             const uint16_t free_list = m_page_head.m_freed_unit_head_offset.exchange(
-                0, std::memory_order_acq_rel);
+                0, memory_order::memory_order_acq_rel);
 
             if (free_list != 0)
             {
@@ -619,11 +613,11 @@ namespace woomem_cppimpl
         void drop_back_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
         {
             assert(freeing_unit_head->m_parent_page == this);
-            assert(0 == freeing_unit_head->m_allocated_status.load(std::memory_order_relaxed));
+            assert(0 == freeing_unit_head->m_allocated_status.load(memory_order::memory_order_relaxed));
 
             freeing_unit_head->m_next_alloc_unit_offset =
                 m_page_head.m_freed_unit_head_offset.load(
-                    std::memory_order_relaxed);
+                    memory_order::memory_order_relaxed);
 
             // Ok, this unit is freed by current thread now
             const uint16_t current_unit_offset =
@@ -637,8 +631,8 @@ namespace woomem_cppimpl
                 !m_page_head.m_freed_unit_head_offset.compare_exchange_weak(
                     freeing_unit_head->m_next_alloc_unit_offset,
                     current_unit_offset,
-                    std::memory_order_release,
-                    std::memory_order_relaxed))
+                    memory_order::memory_order_release,
+                    memory_order::memory_order_relaxed))
             {
                 WOOMEM_PAUSE();
             }
@@ -673,9 +667,9 @@ namespace woomem_cppimpl
         {
             m_page_head.m_next_large_unit = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
-            m_page_head.m_abondon_page_flag.store(0, std::memory_order_relaxed);
+            m_page_head.m_abondon_page_flag.store(0, memory_order::memory_order_relaxed);
 
-            m_page_head.m_freed_unit_head_offset.store(0, std::memory_order_relaxed);
+            m_page_head.m_freed_unit_head_offset.store(0, memory_order::memory_order_relaxed);
             m_page_head.m_next_alloc_unit_head_offset = 0;
 
             m_unit_head.m_parent_page = nullptr;
@@ -689,14 +683,14 @@ namespace woomem_cppimpl
     {
         Chunk* m_last_chunk;
 
-        std::atomic_size_t m_next_commiting_page_count;
-        std::atomic_size_t m_commited_page_count;
+        atomic_size_t m_next_commiting_page_count;
+        atomic_size_t m_commited_page_count;
 
         atomic_uint8_t* const m_cardtable /* same as virtual address begin */;
         Page* const m_reserved_address_begin;
         Page* const m_reserved_address_end;
 
-        static_assert(std::atomic_uint8_t::is_always_lock_free,
+        static_assert(atomic_uint8_t::is_always_lock_free,
             "atomic_uint8_t must be lock free for m_cardtable");
 
         Chunk(void* reserved_address) noexcept
@@ -719,7 +713,7 @@ namespace woomem_cppimpl
         {
             // Todo.
             const size_t commited_page_count =
-                m_commited_page_count.load(std::memory_order_relaxed);
+                m_commited_page_count.load(memory_order::memory_order_relaxed);
 
             const int decommit_status = woomem_os_decommit_memory(
                 m_cardtable,
@@ -742,7 +736,7 @@ namespace woomem_cppimpl
             const size_t need_group_count = PAGE_GROUP_NEED_PAGE_COUNTS[page_group];
 
             size_t new_page_index =
-                m_next_commiting_page_count.load(std::memory_order_relaxed);
+                m_next_commiting_page_count.load(memory_order::memory_order_relaxed);
 
             do
             {
@@ -757,8 +751,8 @@ namespace woomem_cppimpl
                 if (m_next_commiting_page_count.compare_exchange_weak(
                     new_page_index,
                     desired_page_index,
-                    std::memory_order_relaxed,
-                    std::memory_order_relaxed))
+                    memory_order::memory_order_relaxed,
+                    memory_order::memory_order_relaxed))
                 {
                     // Page space reserved successfully.
                     *out_page_run_out = false;
@@ -804,13 +798,13 @@ namespace woomem_cppimpl
                     if (m_commited_page_count.compare_exchange_weak(
                         expected_commited,
                         new_page_index + need_group_count,
-                        std::memory_order_relaxed,
-                        std::memory_order_relaxed))
+                        memory_order::memory_order_relaxed,
+                        memory_order::memory_order_relaxed))
                     {
                         // Successfully updated commited_page_count
                         return &m_reserved_address_begin[new_page_index];
                     }
-                    else if (m_next_commiting_page_count.load(std::memory_order_relaxed) <= new_page_index)
+                    else if (m_next_commiting_page_count.load(memory_order::memory_order_relaxed) <= new_page_index)
                     {
                         // Another thread has rollbacked.
                         const int decommit_status = woomem_os_decommit_memory(
@@ -835,7 +829,7 @@ namespace woomem_cppimpl
                 {
                     size_t current_commiting_page_count =
                         m_next_commiting_page_count.load(
-                            std::memory_order_relaxed);
+                            memory_order::memory_order_relaxed);
 
                     if (m_next_commiting_page_count > new_page_index)
                     {
@@ -843,7 +837,7 @@ namespace woomem_cppimpl
                         if (m_next_commiting_page_count.compare_exchange_weak(
                             current_commiting_page_count,
                             new_page_index,
-                            std::memory_order_relaxed))
+                            memory_order::memory_order_relaxed))
                         {
                             // Already rollbacked by this thread.
                             return nullptr;
@@ -990,7 +984,7 @@ namespace woomem_cppimpl
             m_addr_to_chunk_table.reset();
 
             HugeUnitHead* huge_unit =
-                m_huge_units_for_gc_walk_through.exchange(nullptr, std::memory_order_relaxed);
+                m_huge_units_for_gc_walk_through.exchange(nullptr, memory_order::memory_order_relaxed);
 
             while (huge_unit != nullptr)
             {
@@ -1004,13 +998,13 @@ namespace woomem_cppimpl
             }
 
             for (auto& free_page_group_page : m_free_group_page_list)
-                free_page_group_page.store(nullptr, std::memory_order_relaxed);
+                free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
 
             for (auto& free_large_unit_list : m_free_large_unit_list)
-                m_free_large_unit_list->store(nullptr, std::memory_order_relaxed);
+                m_free_large_unit_list->store(nullptr, memory_order::memory_order_relaxed);
 
             Chunk* current_chunk =
-                m_current_chunk.load(std::memory_order_acquire);
+                m_current_chunk.load(memory_order::memory_order_acquire);
 
             assert(current_chunk != nullptr);
 
@@ -1027,13 +1021,13 @@ namespace woomem_cppimpl
 
             m_current_chunk.store(
                 nullptr,
-                std::memory_order_release);
+                memory_order::memory_order_release);
         }
 
         /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
             Chunk* current_chunk =
-                m_current_chunk.load(std::memory_order_relaxed);
+                m_current_chunk.load(memory_order::memory_order_relaxed);
 
             do
             {
@@ -1058,8 +1052,8 @@ namespace woomem_cppimpl
                         while (!m_current_chunk.compare_exchange_weak(
                             current_chunk->m_last_chunk,
                             current_chunk,
-                            std::memory_order_release,
-                            std::memory_order_acquire))
+                            memory_order::memory_order_release,
+                            memory_order::memory_order_acquire))
                         {
                             WOOMEM_PAUSE();
                         }
@@ -1079,15 +1073,15 @@ namespace woomem_cppimpl
         {
             auto& group = m_free_group_page_list[group_type];
 
-            auto* free_page = group.load(std::memory_order_acquire);
+            auto* free_page = group.load(memory_order::memory_order_acquire);
 
             while (free_page != nullptr)
             {
                 if (group.compare_exchange_weak(
                     free_page,
                     free_page->m_page_head.m_next_page,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire))
+                    memory_order::memory_order_acq_rel,
+                    memory_order::memory_order_acquire))
                 {
                     // Successfully got the page
                     free_page->m_page_head.m_next_page = nullptr;
@@ -1106,13 +1100,13 @@ namespace woomem_cppimpl
                 freeing_page->m_page_head.m_page_belong_to_group];
 
             freeing_page->m_page_head.m_next_page =
-                group.load(std::memory_order_relaxed);
+                group.load(memory_order::memory_order_relaxed);
 
             while (!group.compare_exchange_weak(
                 freeing_page->m_page_head.m_next_page,
                 freeing_page,
-                std::memory_order_release,
-                std::memory_order_relaxed))
+                memory_order::memory_order_release,
+                memory_order::memory_order_relaxed))
             {
                 WOOMEM_PAUSE();
             }
@@ -1126,12 +1120,12 @@ namespace woomem_cppimpl
                 large_unit_head->m_page_head.m_page_belong_to_group];
 
             large_unit_head->m_page_head.m_next_large_unit =
-                large_unit_list.load(std::memory_order_relaxed);
+                large_unit_list.load(memory_order::memory_order_relaxed);
             while (!large_unit_list.compare_exchange_weak(
                 large_unit_head->m_page_head.m_next_large_unit,
                 large_unit_head,
-                std::memory_order_release,
-                std::memory_order_relaxed))
+                memory_order::memory_order_release,
+                memory_order::memory_order_relaxed))
             {
                 WOOMEM_PAUSE();
             }
@@ -1140,14 +1134,14 @@ namespace woomem_cppimpl
         {
             auto& large_unit_list = m_free_large_unit_list[group_type];
             LargePageUnitHead* free_large_unit =
-                large_unit_list.load(std::memory_order_acquire);
+                large_unit_list.load(memory_order::memory_order_acquire);
             while (free_large_unit != nullptr)
             {
                 if (large_unit_list.compare_exchange_weak(
                     free_large_unit,
                     free_large_unit->m_page_head.m_next_large_unit,
-                    std::memory_order_acq_rel,
-                    std::memory_order_acquire))
+                    memory_order::memory_order_acq_rel,
+                    memory_order::memory_order_acquire))
                 {
                     // Successfully got the large unit
                     free_large_unit->m_page_head.m_next_large_unit = nullptr;
@@ -1195,14 +1189,14 @@ namespace woomem_cppimpl
         void commit_huge_unit_into_list_step2(HugeUnitHead* huge_unit)
         {
             assert(1 == huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
-                std::memory_order_relaxed));
+                memory_order::memory_order_relaxed));
 
-            huge_unit->m_next_huge_unit = m_huge_units_for_gc_walk_through.load(std::memory_order_relaxed);
+            huge_unit->m_next_huge_unit = m_huge_units_for_gc_walk_through.load(memory_order::memory_order_relaxed);
             while (!m_huge_units_for_gc_walk_through.compare_exchange_weak(
                 huge_unit->m_next_huge_unit,
                 huge_unit,
-                std::memory_order_release,
-                std::memory_order_relaxed))
+                memory_order::memory_order_release,
+                memory_order::memory_order_relaxed))
             {
                 WOOMEM_PAUSE();
             }
@@ -1246,7 +1240,7 @@ namespace woomem_cppimpl
             allocated_unit->m_gc_type = unit_type_mask;
             allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
             // 使用 relaxed 因为 m_allocated_status 会使用 release 保证可见性
-            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, std::memory_order_relaxed);
+            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
 
             // 最后设置 allocated_status，使用 release 确保之前的写入对其他线程可见
             // 
@@ -1254,7 +1248,7 @@ namespace woomem_cppimpl
             //      无法正确读取到分配的元数据；这可能导致 GC 错误判断单元的分配时机导致错误
             //      释放
             //
-            allocated_unit->m_allocated_status.store(1, std::memory_order_release);
+            allocated_unit->m_allocated_status.store(1, memory_order::memory_order_release);
         }
 
         // 优化：将分配逻辑拆分，减少热路径的代码大小
@@ -1328,7 +1322,7 @@ namespace woomem_cppimpl
 
                     assert(allocated_unit_head->m_parent_page == nullptr);
                     assert(0 == allocated_unit_head->m_allocated_status.load(
-                        std::memory_order_relaxed));
+                        memory_order::memory_order_relaxed));
 
                     init_allocated_unit(allocated_unit_head, unit_type_mask);
                 }
@@ -1341,7 +1335,7 @@ namespace woomem_cppimpl
                 {
                     assert(allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_parent_page == nullptr);
                     assert(0 == allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
-                        std::memory_order_relaxed));
+                        memory_order::memory_order_relaxed));
 
                     init_allocated_unit(
                         &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
@@ -1407,7 +1401,7 @@ namespace woomem_cppimpl
                     {
                         // Drop run out page.
                         new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
-                        next_page->m_page_head.m_abondon_page_flag.store(1, std::memory_order_release);
+                        next_page->m_page_head.m_abondon_page_flag.store(1, memory_order::memory_order_release);
                     }
                     current_alloc_page = new_page;
                     continue;
@@ -1531,7 +1525,7 @@ namespace woomem_cppimpl
         }
         ~ThreadLocalPageCollection()
         {
-            if (g_global_page_collection.m_current_chunk.load(std::memory_order_acquire) == nullptr)
+            if (g_global_page_collection.m_current_chunk.load(memory_order::memory_order_acquire) == nullptr)
                 // Already shutdown.
                 return;
 
@@ -1554,7 +1548,7 @@ void woomem_init(
     woomem_DestroyCallbackFunc destroyer)
 {
     assert(g_global_page_collection.m_current_chunk.load(
-        std::memory_order_acquire) == nullptr);
+        memory_order::memory_order_acquire) == nullptr);
 
     const size_t sys_mem_page_size = woomem_os_page_size();
     if (PAGE_SIZE % sys_mem_page_size != 0)
@@ -1570,12 +1564,12 @@ void woomem_init(
         abort();
     }
 
-    g_global_mark_ctx.m_user_ctx = user_ctx;
-    g_global_mark_ctx.m_marker = marker;
-    g_global_mark_ctx.m_destroyer = destroyer;
+    gc::g_global_gc_methods.m_user_ctx = user_ctx;
+    gc::g_global_gc_methods.m_marker = marker;
+    gc::g_global_gc_methods.m_destroyer = destroyer;
 
     g_global_page_collection.m_current_chunk.store(
-        Chunk::create_new_chunk(), std::memory_order_release);
+        Chunk::create_new_chunk(), memory_order::memory_order_release);
 }
 void woomem_shutdown(void)
 {
