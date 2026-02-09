@@ -77,4 +77,15 @@ namespace woomem_cppimpl::gc
     };
 
     thread_local ThreadLocalCollector t_tls_collector;
+
+    /*
+    GC 流程：
+
+    1. GC 开始，更新轮次计数；
+    2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
+    3. 标记 WOOMEM 的根对象
+    4. 根据 Cardtable，标记老年代对象中的新生代对象
+    5. 起始标记完成，收集此刻的 CollectorContext，进行 fullmark
+        * 由于fullmark 期间，其他线程可能因写屏障，
+    */
 }
