@@ -1,8 +1,6 @@
 #include "woomem.h"
 #include "woomem_os_mmap.h"
 
-#include "woomem_gc.hpp"
-
 #include <cstdio>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +12,12 @@
 #include <vector>
 #include <algorithm>
 #include <map>
+#include <unordered_set>
+#include <forward_list>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 using namespace std;
 
@@ -51,27 +55,6 @@ using namespace std;
 
 namespace woomem_cppimpl
 {
-    constexpr size_t PAGE_SIZE = 64 * 1024;             // 64KB
-
-    /* A Chunk will store many page, each page will be used for One specified allocated size */
-    constexpr size_t CHUNK_SIZE = 128 * 1024 * 1024;    // 128MB
-
-    constexpr size_t PAGE_COUNT_PER_CHUNK = CHUNK_SIZE / PAGE_SIZE;
-
-    constexpr size_t CARDTABLE_SIZE_PER_BIT = 512;      // 512 Bytes per bit
-
-    constexpr size_t CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK = CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 8;
-
-    constexpr size_t BASE_ALIGNMENT = 8;                // 8 Bytes
-
-    constexpr size_t LARGE_SPACE_HEAD_SIZE = 32;        // 32 Bytes header for large space
-
-    constexpr size_t MOST_LARGE_UNIT_SIZE = 16 * PAGE_SIZE - LARGE_SPACE_HEAD_SIZE;
-
-    constexpr uint8_t NEW_BORN_GC_AGE = 15;
-
-    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
-
     class RWSpin
     {
         atomic_uint32_t m_spin_mark;
@@ -156,6 +139,61 @@ namespace woomem_cppimpl
             assert(0 != (prev_status & ~WRITE_LOCK_MASK));
         }
     };
+    class Spin
+    {
+        std::atomic_flag m_spin = ATOMIC_FLAG_INIT;
+    public:
+        Spin() = default;
+
+        Spin(const Spin&) = delete;
+        Spin(Spin&&) = delete;
+        Spin& operator=(const Spin&) = delete;
+        Spin& operator=(Spin&&) = delete;
+
+        void lock() noexcept
+        {
+            while (m_spin.test_and_set(memory_order::memory_order_acquire))
+                WOOMEM_PAUSE();
+        }
+        void unlock()
+        {
+            m_spin.clear(memory_order::memory_order_release);
+        }
+    };
+
+    namespace gc
+    {
+        struct GlobalGCMethods
+        {
+            woomem_UserContext          m_user_ctx;
+
+            woomem_MarkCallbackFunc     m_marker;
+            woomem_DestroyCallbackFunc  m_destroyer;
+            woomem_RootMarkingFunc      m_root_marking;
+        };
+        GlobalGCMethods g_global_gc_methods;
+    }
+
+    constexpr size_t PAGE_SIZE = 64 * 1024;             // 64KB
+
+    /* A Chunk will store many page, each page will be used for One specified allocated size */
+    constexpr size_t CHUNK_SIZE = 128 * 1024 * 1024;    // 128MB
+
+    constexpr size_t PAGE_COUNT_PER_CHUNK = CHUNK_SIZE / PAGE_SIZE;
+
+    constexpr size_t CARDTABLE_SIZE_PER_BIT = 512;      // 512 Bytes per bit
+
+    constexpr size_t CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK = CHUNK_SIZE / CARDTABLE_SIZE_PER_BIT / 8;
+
+    constexpr size_t BASE_ALIGNMENT = 8;                // 8 Bytes
+
+    constexpr size_t LARGE_SPACE_HEAD_SIZE = 32;        // 32 Bytes header for large space
+
+    constexpr size_t MOST_LARGE_UNIT_SIZE = 16 * PAGE_SIZE - LARGE_SPACE_HEAD_SIZE;
+
+    constexpr uint8_t NEW_BORN_GC_AGE = 15;
+
+    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
 
     enum PageGroupType : uint8_t
     {
@@ -490,8 +528,8 @@ namespace woomem_cppimpl
             if (m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_FINALIZER)
             {
                 gc::g_global_gc_methods.m_destroyer(
-                    reinterpret_cast<void*>(this + 1),
-                    gc::g_global_gc_methods.m_user_ctx);
+                    gc::g_global_gc_methods.m_user_ctx,
+                    reinterpret_cast<void*>(this + 1));
             }
         }
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
@@ -936,29 +974,33 @@ namespace woomem_cppimpl
         RWSpin m_rwspin;
         map<void*, /* OPTIONAL */ Chunk*> m_chunk_map;
     public:
-        void reset()noexcept
+        void _reset()noexcept
         {
+            // `_reset` only invoked while shutting-down, donot need to lock guard.
             m_chunk_map.clear();
         }
         WOOMEM_FORCE_INLINE void add_new_chunk(Chunk* new_chunk_instance) noexcept
         {
-            m_rwspin.lock();
-            {
-                auto result = m_chunk_map.insert(
-                    make_pair(
-                        new_chunk_instance->m_reserved_address_begin,
-                        new_chunk_instance));
+            lock_guard<RWSpin> g(m_rwspin);
 
-                (void)result;
-                assert(result.second);
-            }
-            m_rwspin.unlock();
+            auto result = m_chunk_map.insert(
+                make_pair(
+                    new_chunk_instance->m_reserved_address_begin,
+                    new_chunk_instance));
+
+            (void)result;
+            assert(result.second);
         }
         // void add_huge_unit(..) noexcept;
     };
 
+    struct ThreadLocalPageCollection;
+
     struct GlobalPageCollection
     {
+        RWSpin m_threads_mx;
+        forward_list<ThreadLocalPageCollection*> m_threads;
+
         atomic<Chunk*> m_current_chunk;
         AddrToBlockFastLookupTable m_addr_to_chunk_table;
 
@@ -979,50 +1021,7 @@ namespace woomem_cppimpl
         */
         atomic<HugeUnitHead*> m_huge_units_for_gc_walk_through;
 
-        void reset() noexcept
-        {
-            m_addr_to_chunk_table.reset();
-
-            HugeUnitHead* huge_unit =
-                m_huge_units_for_gc_walk_through.exchange(nullptr, memory_order::memory_order_relaxed);
-
-            while (huge_unit != nullptr)
-            {
-                HugeUnitHead* const current_unit = huge_unit;
-                huge_unit = huge_unit->m_next_huge_unit;
-
-                // Donot invoke destroy function when reset.
-                // 
-                //(void)current_unit->m_large_page_unit_head.m_unit_head.try_free_this_unit_head();
-                free(current_unit);
-            }
-
-            for (auto& free_page_group_page : m_free_group_page_list)
-                free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
-
-            for (auto& free_large_unit_list : m_free_large_unit_list)
-                m_free_large_unit_list->store(nullptr, memory_order::memory_order_relaxed);
-
-            Chunk* current_chunk =
-                m_current_chunk.load(memory_order::memory_order_acquire);
-
-            assert(current_chunk != nullptr);
-
-            do
-            {
-                Chunk* last_chunk = current_chunk->m_last_chunk;
-
-                current_chunk->~Chunk();
-                free(current_chunk);
-
-                current_chunk = last_chunk;
-
-            } while (current_chunk != nullptr);
-
-            m_current_chunk.store(
-                nullptr,
-                memory_order::memory_order_release);
-        }
+        void reset() noexcept;
 
         /* OPTIONAL */ void* allocate_new_page(PageGroupType page_group)
         {
@@ -1201,8 +1200,57 @@ namespace woomem_cppimpl
                 WOOMEM_PAUSE();
             }
         }
+
+        void register_thread(ThreadLocalPageCollection* thread_local_page_collection)noexcept
+        {
+            lock_guard<RWSpin> g(m_threads_mx);
+            m_threads.push_front(thread_local_page_collection);
+        }
+        void unregister_thread(ThreadLocalPageCollection* thread_local_page_collection)noexcept
+        {
+            lock_guard<RWSpin> g(m_threads_mx);
+
+            auto i = m_threads.before_begin();
+            const auto e = m_threads.end();
+
+            for (;;)
+            {
+                auto last_i = i++;
+
+                if (last_i == e)
+                    // Unexpected.
+                    abort();
+
+                if (*i == thread_local_page_collection)
+                {
+                    m_threads.erase_after(last_i);
+                    break;
+                }
+
+            }
+        }
     };
     GlobalPageCollection g_global_page_collection{};
+
+    namespace gc
+    {
+        struct ThreadSafeGrayList
+        {
+            Spin m_gray_unit_heads_mx;
+            vector<UnitHead*> m_gray_unit_heads;
+
+            void record(UnitHead* unit)
+            {
+                lock_guard<Spin> g(m_gray_unit_heads_mx);
+                m_gray_unit_heads.push_back(unit);
+            }
+            void swap(vector<UnitHead*>* out_units)
+            {
+                lock_guard<Spin> g(m_gray_unit_heads_mx);
+                m_gray_unit_heads.swap(*out_units);
+            }
+        };
+    }
 
     struct ThreadLocalPageCollection
     {
@@ -1522,13 +1570,11 @@ namespace woomem_cppimpl
         ThreadLocalPageCollection() noexcept
         {
             reset();
+            g_global_page_collection.register_thread(this);
         }
         ~ThreadLocalPageCollection()
         {
-            if (g_global_page_collection.m_current_chunk.load(memory_order::memory_order_acquire) == nullptr)
-                // Already shutdown.
-                return;
-
+            g_global_page_collection.unregister_thread(this);
             drop();
         }
 
@@ -1538,6 +1584,162 @@ namespace woomem_cppimpl
         ThreadLocalPageCollection& operator=(ThreadLocalPageCollection&&) = delete;
     };
     thread_local ThreadLocalPageCollection t_tls_page_collection;
+
+    void GlobalPageCollection::reset() noexcept
+    {
+        // Reset fast lookup table.
+        m_addr_to_chunk_table._reset();
+
+        HugeUnitHead* huge_unit =
+            m_huge_units_for_gc_walk_through.exchange(nullptr, memory_order::memory_order_relaxed);
+
+        while (huge_unit != nullptr)
+        {
+            HugeUnitHead* const current_unit = huge_unit;
+            huge_unit = huge_unit->m_next_huge_unit;
+
+            // Donot invoke destroy function when reset?
+            //(void)current_unit->m_large_page_unit_head.m_unit_head.try_free_this_unit_head();
+            free(current_unit);
+        }
+
+        for (auto& free_page_group_page : m_free_group_page_list)
+            free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
+
+        for (auto& free_large_unit_list : m_free_large_unit_list)
+            m_free_large_unit_list->store(nullptr, memory_order::memory_order_relaxed);
+
+        Chunk* current_chunk =
+            m_current_chunk.load(memory_order::memory_order_acquire);
+
+        assert(current_chunk != nullptr);
+
+        do
+        {
+            Chunk* last_chunk = current_chunk->m_last_chunk;
+
+            current_chunk->~Chunk();
+            free(current_chunk);
+
+            current_chunk = last_chunk;
+
+        } while (current_chunk != nullptr);
+
+        m_current_chunk.store(
+            nullptr,
+            memory_order::memory_order_release);
+
+        // Reset all threads.
+        lock_guard<RWSpin> g(m_threads_mx);
+
+        for (auto* t : m_threads)
+            t->reset();
+    }
+
+    namespace gc
+    {
+        struct GCMain
+        {
+            GCMain(const GCMain&) = delete;
+            GCMain(GCMain&&) = delete;
+            GCMain& operator = (const GCMain&) = delete;
+            GCMain& operator = (GCMain&&) = delete;
+
+            uint8_t             m_gc_timing;
+
+            bool                m_gc_main_thread_trigger;
+            thread              m_gc_main_thread;
+            mutex               m_gc_main_thread_trigger_mx;
+            condition_variable  m_gc_main_thread_trigger_cv;
+
+            void _gc_main_job() noexcept
+            {
+                // 1. GC 开始，更新轮次计数
+                ++m_gc_timing;
+
+                // 2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
+                if (g_global_gc_methods.m_root_marking != NULL)
+                    g_global_gc_methods.m_root_marking(g_global_gc_methods.m_user_ctx);
+
+                // 3. 标记 WOOMEM 的根对象
+                // TODO;
+
+                // 4. 根据 Cardtable，标记老年代对象中的新生代对象
+                // TODO;
+
+                // 5. 起始标记完成，收集此刻的 CollectorContext，进行 Fullmark
+                /*
+                    * fullmark 期间，其他线程可能因写屏障，继续向 CollectorContext 中追加待标记节点
+                    * 以下情况可以发生待标记节点的追加：
+                        1）尝试将一个未标记单元储存到 Fullmarked 内存区域中
+                        2）尝试将一个新生代单元储存到老年代的内存区域中
+                */
+                // TODO;
+
+                // 6. Fullmark 完成，收集此刻的 CollectorContext，进行补充标记
+                /*
+                    循环执行补充标记，直到 CollectorContext 被清空
+                */
+
+                // 7. 全部标记完成，回收未被标记的单元
+            }
+            void _gc_main_thread() noexcept
+            {
+                for (;;)
+                {
+                    unique_lock<mutex> ug(m_gc_main_thread_trigger_mx);
+                    for (size_t i = 0; i < 1000; ++i)
+                    {
+                        m_gc_main_thread_trigger_cv.wait_for(
+                            ug,
+                            10ms,   // Force trigger GC per 10sec.
+                            [this]()
+                            {
+                                // TODO: 在此检查 GC 策略
+                                return m_gc_main_thread_trigger;
+                            });
+                    }
+                    ug.unlock();
+
+                    // GC Job here.
+                    _gc_main_job();
+                }
+            }
+
+            GCMain()
+                : m_gc_timing(0)
+                , m_gc_main_thread_trigger(false)
+            {
+                m_gc_main_thread = thread(&GCMain::_gc_main_thread, this);
+            }
+            ~GCMain()
+            {
+                m_gc_main_thread.join();
+            }
+
+            void trigger() noexcept
+            {
+                lock_guard<mutex> ug(m_gc_main_thread_trigger_mx);
+                m_gc_main_thread_trigger = true;
+
+                m_gc_main_thread_trigger_cv.notify_one();
+            }
+        };
+        GCMain* g_gc_main = nullptr;
+
+        void init()
+        {
+            assert(g_gc_main == nullptr);
+            g_gc_main = new GCMain();
+        }
+        void shutdown()
+        {
+            assert(g_gc_main != nullptr);
+
+            delete g_gc_main;
+            g_gc_main = nullptr;
+        }
+    }
 }
 
 using namespace woomem_cppimpl;
@@ -1545,7 +1747,8 @@ using namespace woomem_cppimpl;
 void woomem_init(
     woomem_UserContext user_ctx,
     woomem_MarkCallbackFunc marker,
-    woomem_DestroyCallbackFunc destroyer)
+    woomem_DestroyCallbackFunc destroyer,
+    woomem_RootMarkingFunc root_marking)
 {
     assert(g_global_page_collection.m_current_chunk.load(
         memory_order::memory_order_acquire) == nullptr);
@@ -1567,16 +1770,21 @@ void woomem_init(
     gc::g_global_gc_methods.m_user_ctx = user_ctx;
     gc::g_global_gc_methods.m_marker = marker;
     gc::g_global_gc_methods.m_destroyer = destroyer;
+    gc::g_global_gc_methods.m_root_marking = root_marking;
 
     g_global_page_collection.m_current_chunk.store(
         Chunk::create_new_chunk(), memory_order::memory_order_release);
+
+    // GC start.
+    gc::init();
 }
+
 void woomem_shutdown(void)
 {
-    t_tls_page_collection.drop();
-    t_tls_page_collection.reset();
-
     g_global_page_collection.reset();
+
+    // GC stop.
+    gc::shutdown();
 }
 
 /* OPTIONAL */ void* woomem_alloc_normal(size_t size)

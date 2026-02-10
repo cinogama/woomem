@@ -9,11 +9,13 @@ extern "C" {
     typedef void* woomem_UserContext;
     typedef void(*woomem_MarkCallbackFunc)(woomem_UserContext, void*);
     typedef void(*woomem_DestroyCallbackFunc)(woomem_UserContext, void*);
+    typedef void(*woomem_RootMarkingFunc)(woomem_UserContext);
 
     void woomem_init(
         /* OPTIONAL */ woomem_UserContext user_ctx,
         /* OPTIONAL */ woomem_MarkCallbackFunc marker,
-        /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer);
+        /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer,
+        /* OPTIONAL */ woomem_RootMarkingFunc root_marking);
     void woomem_shutdown(void);
 
     /*
