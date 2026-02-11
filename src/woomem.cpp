@@ -724,6 +724,7 @@ namespace woomem_cppimpl
         atomic_size_t m_next_commiting_page_count;
         atomic_size_t m_commited_page_count;
 
+        uint8_t m_multipage_offset[CHUNK_SIZE / PAGE_SIZE];
         atomic_uint8_t* const m_cardtable /* same as virtual address begin */;
         Page* const m_reserved_address_begin;
         Page* const m_reserved_address_end;
@@ -829,6 +830,12 @@ namespace woomem_cppimpl
                     now_alloc_large_unit->init_for_large_page_unit(page_group);
                 }
 
+                // Mark multipage offset.
+                for (size_t page_idx = 0; page_idx < need_group_count; ++page_idx)
+                {
+                    m_multipage_offset[new_page_index + page_idx] = page_idx;
+                }
+
                 // Wait until other threads finish committing.
                 do
                 {
@@ -836,7 +843,7 @@ namespace woomem_cppimpl
                     if (m_commited_page_count.compare_exchange_weak(
                         expected_commited,
                         new_page_index + need_group_count,
-                        memory_order::memory_order_relaxed,
+                        memory_order::memory_order_release,
                         memory_order::memory_order_relaxed))
                     {
                         // Successfully updated commited_page_count
@@ -991,7 +998,95 @@ namespace woomem_cppimpl
             (void)result;
             assert(result.second);
         }
-        // void add_huge_unit(..) noexcept;
+        WOOMEM_FORCE_INLINE void add_huge_unit(HugeUnitHead* huge_unit) noexcept
+        {
+            lock_guard<RWSpin> g(m_rwspin);
+
+            auto result = m_chunk_map.insert(
+                make_pair(
+                    huge_unit + 1, /* Data begin here. */
+                    nullptr));
+
+            (void)result;
+            assert(result.second);
+        }
+        WOOMEM_FORCE_INLINE void remove_huge_unit(HugeUnitHead* huge_unit)
+        {
+            lock_guard<RWSpin> g(m_rwspin);
+            (void)m_chunk_map.erase(huge_unit + 1);
+        }
+
+        /* OPTIONAL */ UnitHead* lookup_unit_head(void* may_valid_addr) noexcept
+        {
+            m_rwspin.lock_shared();
+
+            auto fnd = m_chunk_map.upper_bound(may_valid_addr);
+
+            if (fnd == m_chunk_map.begin())
+            {
+                m_rwspin.unlock_shared();
+                return nullptr;
+            }
+
+            --fnd;
+            void* const storage_begin = fnd->first;
+            /* OPTIONAL */ Chunk* const storage_belong_chunk = fnd->second;
+
+            m_rwspin.unlock_shared();
+
+            if (storage_belong_chunk != nullptr)
+            {
+                if (may_valid_addr >= storage_belong_chunk->m_reserved_address_end)
+                    return nullptr;
+
+                size_t located_page_idx = static_cast<size_t>(
+                    reinterpret_cast<intptr_t>(may_valid_addr)
+                    - reinterpret_cast<intptr_t>(storage_belong_chunk->m_reserved_address_begin)) / PAGE_SIZE;
+
+                located_page_idx -= storage_belong_chunk->m_multipage_offset[located_page_idx];
+
+                Page* const unit_belong_page =
+                    &storage_belong_chunk->m_reserved_address_begin[located_page_idx];
+
+                if (unit_belong_page->m_page_head.m_page_belong_to_group >= LARGE_PAGES_1)
+                {
+                    // Large unit.
+                    return &reinterpret_cast<LargePageUnitHead*>(unit_belong_page)->m_unit_head;
+                }
+                else
+                {
+                    assert(may_valid_addr > unit_belong_page
+                        && unit_belong_page < unit_belong_page + 1);
+
+                    const size_t unit_size = UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                        unit_belong_page->m_page_head.m_page_belong_to_group];
+
+                    return reinterpret_cast<UnitHead*>(
+                        &unit_belong_page->m_entries[
+                            sizeof(UnitHead) +
+                                static_cast<size_t>(reinterpret_cast<char*>(may_valid_addr)
+                                    - &unit_belong_page->m_entries[0]) / unit_size * unit_size]);
+                }
+            }
+            else
+            {
+                // Is huge unit?
+                HugeUnitHead* const huge_unit_head =
+                    reinterpret_cast<HugeUnitHead*>(storage_begin) - 1;
+
+                if (static_cast<size_t>(
+                    reinterpret_cast<char*>(may_valid_addr) -
+                    reinterpret_cast<char*>(storage_begin)) < huge_unit_head->m_fact_unit_size)
+                {
+                    // In range.
+                    return &huge_unit_head->m_large_page_unit_head.m_unit_head;
+                }
+                return nullptr;
+            }
+
+            // Never been here.
+            abort();
+        }
     };
 
     struct ThreadLocalPageCollection;
@@ -1199,6 +1294,7 @@ namespace woomem_cppimpl
             {
                 WOOMEM_PAUSE();
             }
+            m_addr_to_chunk_table.add_huge_unit(huge_unit);
         }
 
         void register_thread(ThreadLocalPageCollection* thread_local_page_collection)noexcept
@@ -1234,20 +1330,120 @@ namespace woomem_cppimpl
 
     namespace gc
     {
-        struct ThreadSafeGrayList
+        struct GlobalGrayList
         {
-            Spin m_gray_unit_heads_mx;
-            vector<UnitHead*> m_gray_unit_heads;
+            struct GrayUnit
+            {
+                UnitHead* m_gray_marked_unit;
+                GrayUnit* m_last;
+            };
 
-            void record(UnitHead* unit)
+            atomic<GrayUnit*> m_list;
+            atomic<GrayUnit*> m_dropped;
+
+            GlobalGrayList()
+                : m_list(nullptr)
+                , m_dropped(nullptr)
             {
-                lock_guard<Spin> g(m_gray_unit_heads_mx);
-                m_gray_unit_heads.push_back(unit);
+
             }
-            void swap(vector<UnitHead*>* out_units)
+            ~GlobalGrayList()
             {
-                lock_guard<Spin> g(m_gray_unit_heads_mx);
-                m_gray_unit_heads.swap(*out_units);
+                GrayUnit* current = m_list.load(std::memory_order_relaxed);
+                while (current != nullptr)
+                {
+                    GrayUnit* next = current->m_last;
+                    free(current);
+                    current = next;
+                }
+
+                current = m_dropped.load(std::memory_order_relaxed);
+                while (current != nullptr)
+                {
+                    GrayUnit* next = current->m_last;
+                    free(current);
+                    current = next;
+                }
+            }
+
+            GlobalGrayList(const GlobalGrayList&) = delete;
+            GlobalGrayList(GlobalGrayList&&) = delete;
+            GlobalGrayList& operator =(const GlobalGrayList&) = delete;
+            GlobalGrayList& operator =(GlobalGrayList&&) = delete;
+
+            GrayUnit* _get_usable_node()
+            {
+                GrayUnit* dropped_node = m_dropped.load(std::memory_order_relaxed);
+                if (dropped_node != nullptr)
+                {
+                    while (!m_dropped.compare_exchange_weak(
+                        dropped_node,
+                        dropped_node->m_last,
+                        std::memory_order_relaxed,
+                        std::memory_order_relaxed))
+                    {
+                        /* Retry. */
+                        if (dropped_node == nullptr)
+                            // Opus, list empty.
+                            break;
+                    }
+                }
+
+                if (dropped_node == nullptr)
+                {
+                    dropped_node = static_cast<GrayUnit*>(malloc(sizeof(GrayUnit)));
+                    if (dropped_node == nullptr)
+                        // Fatal error, cannot alloc memory.
+                        abort();
+                }
+                return dropped_node;
+            }
+
+            void add(UnitHead* unit_head) noexcept
+            {
+                GrayUnit* unit = _get_usable_node();
+
+                unit->m_gray_marked_unit = unit_head;
+                unit->m_last = m_list.load(memory_order_relaxed);
+
+                while (!m_list.compare_exchange_weak(
+                    unit->m_last,
+                    unit,
+                    memory_order::memory_order_relaxed,
+                    memory_order::memory_order_relaxed))
+                {
+                    WOOMEM_PAUSE();
+                }
+            }
+            void drop_list(GrayUnit* drop_unit_list) noexcept
+            {
+                GrayUnit* last_of_dropping_list = drop_unit_list;
+                do
+                {
+                    if (last_of_dropping_list->m_last == nullptr)
+                        break;
+
+                    last_of_dropping_list = last_of_dropping_list->m_last;
+
+                } while (true);
+
+                last_of_dropping_list->m_last =
+                    m_dropped.load(memory_order::memory_order_relaxed);
+
+                while (!m_dropped.compare_exchange_weak(
+                    last_of_dropping_list->m_last,
+                    drop_unit_list,
+                    memory_order::memory_order_relaxed,
+                    memory_order::memory_order_relaxed))
+                {
+                    /* retry. */
+                }
+            }
+            GrayUnit* pick_all_units() noexcept
+            {
+                return m_list.exchange(
+                    nullptr,
+                    memory_order::memory_order_relaxed);
             }
         };
     }
@@ -1652,6 +1848,37 @@ namespace woomem_cppimpl
             mutex               m_gc_main_thread_trigger_mx;
             condition_variable  m_gc_main_thread_trigger_cv;
 
+            GlobalGrayList      m_global_gray_marking_list;
+
+            static void _validate_address_and_mark_to_gray(
+                void* may_addr, std::vector<UnitHead*>* gray_list) noexcept
+            {
+                /* OPTIONAL */ UnitHead* const unit_head =
+                    g_global_page_collection.m_addr_to_chunk_table.lookup_unit_head(may_addr);
+
+                if (unit_head == nullptr
+                    || 0 == unit_head->m_allocated_status.load(
+                        memory_order::memory_order_relaxed))
+                {
+                    // Bad unit.
+                    return;
+                }
+
+                // TODO: Check old unit here.
+
+                uint8_t expected_mark_state = WOOMEM_GC_MARKED_UNMARKED;
+                if (!unit_head->m_gc_marked.compare_exchange_strong(
+                    expected_mark_state,
+                    WOOMEM_GC_MARKED_SELF_MARKED,
+                    memory_order::memory_order_relaxed,
+                    memory_order::memory_order_relaxed))
+                    // This unit has been marked.
+                    return;
+
+                // Add unit to gray list.
+                gray_list->push_back(unit_head);
+            }
+
             void _gc_main_job() noexcept
             {
                 // 1. GC 开始，更新轮次计数
@@ -1723,6 +1950,26 @@ namespace woomem_cppimpl
                 m_gc_main_thread_trigger = true;
 
                 m_gc_main_thread_trigger_cv.notify_one();
+            }
+
+            void sending_to_mark_gray(intptr_t may_addr) noexcept
+            {
+                // TODO: Check if addr is in blocks?
+                m_global_gray_marking_list.add(may_addr);
+            }
+
+            /*
+            fastcheck_and_sending_to_mark_gray 被用于检查和准备标记一些指向单元开头的
+            指针；此处将使用掩码检查对齐情况，注意：如果一个指针指向一个分配空间的中间
+            而非开头，不能使用此方法标记，这可能导致这些单元被错误地过滤掉。
+            */
+            void fastcheck_and_sending_to_mark_gray(intptr_t may_addr) noexcept
+            {
+                if (may_addr == 0 || may_addr & (BASE_ALIGNMENT - 1))
+                    // Bad address, not a valid unit head.
+                    return;
+
+                sending_to_mark_gray(may_addr);
             }
         };
         GCMain* g_gc_main = nullptr;
@@ -1868,4 +2115,21 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
 void woomem_free(void* ptr)
 {
     t_tls_page_collection.free(ptr);
+}
+
+void woomem_try_mark_unit_head(intptr_t address_may_invalid)
+{
+    gc::g_gc_main->fastcheck_and_sending_to_mark_gray(
+        address_may_invalid);
+}
+
+void woomem_try_mark_unit(intptr_t address_may_invalid)
+{
+    gc::g_gc_main->sending_to_mark_gray(
+        address_may_invalid);
+}
+
+void woomem_mark_unit(void* address)
+{
+
 }

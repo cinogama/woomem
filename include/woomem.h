@@ -100,41 +100,19 @@ extern "C" {
     void woomem_free(void* ptr);
 
     /*
-    GC接口，外部的GC实现通过此接口尝试检查和初步标记一个可能的地址，如果：
-        1）给定的单元不是一个合法的地址（并非有效地址，或者不是当前分配器分配的地址）
-        2）已经被标记（无论被标记为何种状态）
-        3）属于WOOMEM_GC_MARKED_DONOT_RELEASE
-        4）正在执行 MINOR_GC且当前对象是老年代，
-
-    则返回 NULL，否则将该单元标记为 WOOMEM_GC_MARKED_SELF_MARKED 并返回该单元的实际地址。
-
-    如果一个对象即将从新生代晋升为老年代，则 *out_becoming_old 将被设置为 WOOMEM_BOOL_TRUE，
-    否则为 WOOMEM_BOOL_FALSE。
+    使用此方法标记疑似单元的起始地址
     */
-    /* OPTIONAL */ void* woomem_try_mark_self(intptr_t maybe_ptr, woomem_Bool* out_becoming_old);
+    void woomem_try_mark_unit_head(intptr_t address_may_invalid);
 
     /*
-    GC接口，当外部的GC实现完成对某个单元的完整扫描后，调用此接口将该单元的 m_gc_marked 标记为
-    WOOMEM_GC_MARKED_FULL_MARKED。
+    使用此方法标记疑似单元
     */
-    void woomem_full_mark(void* ptr);
+    void woomem_try_mark_unit(intptr_t address_may_invalid);
 
     /*
-    GC接口，宣告一轮新的标记-回收开始。
-    更新内部GC轮次计数器，表示一轮新的GC开始。
-    如果 is_full_gc 为 TRUE，则表示此次GC为 FULL_GC，否则为 MINOR_GC。
+    使用此方法标记明确的单元起始地址
     */
-    void woomem_begin_gc_mark(woomem_Bool is_full_gc);
-
-    /*
-    GC接口，宣告一轮新的标记-回收结束。
-    释放所有未标记的内存单元（除非对象是老年代，且正在执行 MINOR_GC）。
-    */
-    void woomem_end_gc_mark_and_free_all_unmarked(
-        woomem_DestroyFunc  destroy_func,
-        void*               userdata);
-
-    // woomem_Bool woomem_new_gc_round_launched(void);
+    void woomem_mark_unit(void* address);
 
 #ifdef __cplusplus
 }
