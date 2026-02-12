@@ -23,7 +23,7 @@ extern "C" {
     */
     typedef enum woomem_GCUnitTypeMask
     {
-        // 这段内存需要在GC过程中被扫描和释放
+        // 如果未被标记，这段内存需要在GC过程中被释放
         WOOMEM_GC_UNIT_TYPE_NEED_SWEEP = 1 << 0,
 
         // 这段内存如果被标记，需要扫描其内部的所有疑似引用
@@ -99,6 +99,11 @@ extern "C" {
     void woomem_free(void* ptr);
 
     /*
+    检查 GC 是否正在标记阶段，如果是，返回 WOOMEM_BOOL_TRUE
+    */
+    woomem_Bool woomem_checkpoint(void);
+
+    /*
     使用此方法标记疑似单元的起始地址
     */
     void woomem_try_mark_unit_head(intptr_t address_may_invalid);
@@ -107,11 +112,6 @@ extern "C" {
     使用此方法标记疑似单元
     */
     void woomem_try_mark_unit(intptr_t address_may_invalid);
-
-    /*
-    使用此方法标记明确的单元起始地址
-    */
-    void woomem_mark_unit(void* address);
 
 #ifdef __cplusplus
 }

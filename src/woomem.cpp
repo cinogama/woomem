@@ -516,7 +516,7 @@ namespace woomem_cppimpl
         Page* m_parent_page;
 
         uint8_t         m_alloc_timing;
-        uint8_t /* woomem_GCUnitType */ m_gc_type;
+        uint8_t /* woomem_GCUnitTypeMask */ m_gc_type;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
         /* NOTE: Consider use this field to store unit offset, avoid using m_parent_page */
@@ -1332,6 +1332,9 @@ namespace woomem_cppimpl
 
     namespace gc
     {
+        /*
+        TODO: 优化 GlobalGrayList 实现，考虑一个节点储存复数个单元？
+        */
         struct GlobalGrayList
         {
             struct GrayUnit
@@ -1845,6 +1848,7 @@ namespace woomem_cppimpl
             GCMain& operator = (const GCMain&) = delete;
             GCMain& operator = (GCMain&&) = delete;
 
+            bool                m_gc_in_marking;
             uint8_t             m_gc_timing;
 
             bool                m_gc_main_thread_trigger;
@@ -1853,29 +1857,63 @@ namespace woomem_cppimpl
             condition_variable  m_gc_main_thread_trigger_cv;
 
             GlobalGrayList      m_global_gray_marking_list;
-
+            
             /*
             因为 m_addr_to_chunk_table 的快速查找表只能定位到单元，但是不会检查
             单元本身是否是一个已经分配的内存，到标记时自然能够发现。
             */
-            WOOMEM_FORCE_INLINE /* OPTIONAL */ UnitHead* _try_get_unit_head(
+            static WOOMEM_FORCE_INLINE /* OPTIONAL */ UnitHead* _try_get_unit_head(
                 void* may_addr) noexcept
             {
                 return g_global_page_collection.m_addr_to_chunk_table.lookup_unit_head(
                     may_addr);
             }
+            static size_t _get_unit_fact_size(UnitHead* unit_head) noexcept
+            {
+                if (WOOMEM_LIKELY(unit_head->m_parent_page != nullptr))
+                {
+                    // Is normal page.
+                    return UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                        unit_head->m_parent_page->m_page_head.m_page_belong_to_group];
+                }
+                else
+                {
+                    // Is large or huge unit.
+                    LargePageUnitHead* const large_page_unit_head =
+                        reinterpret_cast<LargePageUnitHead*>(unit_head + 1) - 1;
+
+                    if (WOOMEM_LIKELY(large_page_unit_head->m_page_head.m_page_belong_to_group != HUGE))
+                    {
+                        // Is large unit
+                        return UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                            large_page_unit_head->m_page_head.m_page_belong_to_group];
+                    }
+                    else
+                    {
+                        // Hahaha...
+                        HugeUnitHead* const huge_unit_head =
+                            reinterpret_cast<HugeUnitHead*>(unit_head + 1) - 1;
+
+                        return huge_unit_head->m_fact_unit_size;
+                    }
+                }
+                // Never been here.
+                abort();
+            }
 
             void _mark_unit_to_gray(
-                UnitHead* unit,
+                UnitHead* unit_head,
                 vector<UnitHead*>* modified_gray_units_to_continue_mark)
             {
                 uint8_t expected_state = WOOMEM_GC_MARKED_UNMARKED;
-                if (unit->m_gc_marked.compare_exchange_strong(
+                if (unit_head->m_gc_marked.compare_exchange_strong(
                     expected_state,
-                    WOOMEM_GC_MARKED_SELF_MARKED))
+                    WOOMEM_GC_MARKED_SELF_MARKED,
+                    memory_order::memory_order_relaxed,
+                    memory_order::memory_order_relaxed))
                 {
                     // Marked, send to continue mark list.
-                    modified_gray_units_to_continue_mark->push_back(unit);
+                    modified_gray_units_to_continue_mark->push_back(unit_head);
                 }
             }
 
@@ -1929,12 +1967,54 @@ namespace woomem_cppimpl
                         2）尝试将一个新生代单元储存到老年代的内存区域中
                 */
                 vector<UnitHead*> continue_marking_list;
-                while (_pick_all_unit_in_ray_marking_list_and_mark_them(&continue_marking_list))
+                while (_pick_all_unit_in_ray_marking_list_and_mark_them(
+                    &continue_marking_list))
                 {
+                    vector<UnitHead*> current_marking_list;
+                    current_marking_list.swap(continue_marking_list);
 
+                    for (auto* unit_to_mark : current_marking_list)
+                    {
+                        uint8_t expected_state = WOOMEM_GC_MARKED_SELF_MARKED;
+                        if (!unit_to_mark->m_gc_marked.compare_exchange_strong(
+                            expected_state,
+                            WOOMEM_GC_MARKED_FULL_MARKED,
+                            memory_order::memory_order_relaxed,
+                            memory_order::memory_order_relaxed))
+                        {
+                            // This unit has been marked as black or has been freed manually.
+                            assert(expected_state == WOOMEM_GC_MARKED_FULL_MARKED
+                                || expected_state == WOOMEM_GC_MARKED_RELEASED);
+                            continue;
+                        }
+
+                        if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK)
+                        {
+                            // Need auto mark.
+                            const size_t unit_fact_step = _get_unit_fact_size(unit_to_mark) / sizeof(void*);
+                            void** const unit_storages = reinterpret_cast<void**>(unit_to_mark + 1);
+
+                            for (size_t i = 0; i < unit_fact_step; ++i)
+                            {
+                                UnitHead* const child_unit_to_mark =
+                                    _try_get_unit_head(unit_storages[i]);
+
+                                if (child_unit_to_mark != nullptr)
+                                    _mark_unit_to_gray(child_unit_to_mark, &continue_marking_list);
+                            }
+                        }
+                        if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_MARKER)
+                        {
+                            // Need to mark by user callback.
+                            g_global_gc_methods.m_marker(
+                                g_global_gc_methods.m_user_ctx,
+                                unit_to_mark + 1);
+                        }
+                    }
                 }
 
-                // 7. 全部标记完成，回收未被标记的单元
+                // 6. 全部标记完成，回收未被标记的单元
+
             }
             void _gc_main_thread() noexcept
             {
@@ -1960,7 +2040,8 @@ namespace woomem_cppimpl
             }
 
             GCMain()
-                : m_gc_timing(0)
+                : m_gc_in_marking(false)
+                , m_gc_timing(0)
                 , m_gc_main_thread_trigger(false)
             {
                 m_gc_main_thread = thread(&GCMain::_gc_main_thread, this);
@@ -2159,7 +2240,13 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
         address_may_invalid);
 }
 
-void woomem_mark_unit(void* address)
+woomem_Bool woomem_checkpoint(void)
 {
-
+    if (gc::g_gc_main->m_gc_in_marking)
+    {
+        // Sync GC timing.
+        t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;
+        return WOOMEM_BOOL_TRUE;
+    }
+    return WOOMEM_BOOL_FALSE;
 }
