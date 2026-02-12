@@ -557,6 +557,12 @@ namespace woomem_cppimpl
             m_gc_marked.store(
                 WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
         }
+        WOOMEM_FORCE_INLINE bool is_not_marked_during_this_round_gc(uint8_t gc_timing) const noexcept
+        {
+            return m_gc_marked.load(memory_order::memory_order_relaxed) == WOOMEM_GC_MARKED_UNMARKED
+                && (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
+                && m_gc_age != gc_timing;
+        }
     };
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
@@ -1061,14 +1067,19 @@ namespace woomem_cppimpl
                     assert(may_valid_addr > unit_belong_page
                         && unit_belong_page < unit_belong_page + 1);
 
-                    const size_t unit_size = UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
-                        unit_belong_page->m_page_head.m_page_belong_to_group];
+                    const size_t unit_size_with_unit_head =
+                        sizeof(UnitHead) +
+                        UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                            unit_belong_page->m_page_head.m_page_belong_to_group];
+
+                    const size_t located_unit_idx =
+                        static_cast<size_t>(
+                            reinterpret_cast<char*>(may_valid_addr) -
+                            &unit_belong_page->m_entries[sizeof(PageHead)]) / unit_size_with_unit_head;
 
                     return reinterpret_cast<UnitHead*>(
                         &unit_belong_page->m_entries[
-                            sizeof(UnitHead) +
-                                static_cast<size_t>(reinterpret_cast<char*>(may_valid_addr)
-                                    - &unit_belong_page->m_entries[0]) / unit_size * unit_size]);
+                            sizeof(PageHead) + located_unit_idx * unit_size_with_unit_head]);
                 }
             }
             else
@@ -1209,7 +1220,7 @@ namespace woomem_cppimpl
             }
         }
 
-        void free_large_unit_asyncly(LargePageUnitHead* large_unit_head) noexcept
+        void return_freed_large_unit_asyncly(LargePageUnitHead* large_unit_head) noexcept
         {
             assert(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE);
 
@@ -1696,7 +1707,7 @@ namespace woomem_cppimpl
                 if (WOOMEM_LIKELY(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE))
                 {
                     // 大对象，返回到全局大对象池
-                    g_global_page_collection.free_large_unit_asyncly(large_unit_head);
+                    g_global_page_collection.return_freed_large_unit_asyncly(large_unit_head);
                 }
                 // Or: HUGE 对象，分配标记已经解除；确实的释放操作将由GC负责，此处啥也不做
             }
@@ -2019,7 +2030,7 @@ namespace woomem_cppimpl
                 m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
 
                 // Walkthrough all chunks and huge units.
-                Chunk* current_chunk = 
+                Chunk* current_chunk =
                     g_global_page_collection.m_current_chunk.load(memory_order::memory_order_relaxed);
 
                 while (current_chunk != nullptr)
@@ -2035,13 +2046,44 @@ namespace woomem_cppimpl
                         if (current_page->m_page_head.m_page_belong_to_group < LARGE_PAGES_1)
                         {
                             // Is normal page.
-                            TODO;
+                            const size_t page_unit_size_with_unit_head =
+                                sizeof(UnitHead) + UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                                    current_page->m_page_head.m_page_belong_to_group];
 
+                            for (
+                                size_t boffset = sizeof(PageHead);
+                                boffset < sizeof(Page);
+                                boffset += page_unit_size_with_unit_head)
+                            {
+                                UnitHead* const this_unit_head = reinterpret_cast<UnitHead*>(
+                                    &current_page->m_entries[boffset]);
+
+                                assert(this_unit_head->m_parent_page == current_page);
+
+                                if (this_unit_head->is_not_marked_during_this_round_gc(m_gc_timing))
+                                {
+                                    // Unit that need to be sweep didn't marked, and not allocated during this round GC scan.
+                                    // Release it.
+
+                                    this_unit_head->m_parent_page->free_unit_in_this_page_asyncly(this_unit_head);
+                                }
+                            }
                         }
                         else
                         {
                             // Is large unit page.
+                            LargePageUnitHead* const this_large_unit_head =
+                                reinterpret_cast<LargePageUnitHead*>(current_page);
 
+                            assert(this_large_unit_head->m_unit_head.m_parent_page == nullptr);
+
+                            if (this_large_unit_head->m_unit_head.is_not_marked_during_this_round_gc(m_gc_timing))
+                            {
+                                if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
+                                {
+                                    g_global_page_collection.return_freed_large_unit_asyncly(this_large_unit_head);
+                                }
+                            }
 
                             // Move forward to skip current unit.
                             pid += PAGE_GROUP_NEED_PAGE_COUNTS[
@@ -2051,6 +2093,9 @@ namespace woomem_cppimpl
 
                     current_chunk = current_chunk->m_last_chunk;
                 }
+
+                // Walkthrough all huge units.
+                TODO;
             }
             void _gc_main_thread() noexcept
             {
