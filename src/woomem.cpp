@@ -484,7 +484,7 @@ namespace woomem_cppimpl
     union Page;
     struct LargePageUnitHead;
 
-    struct alignas(16) PageHead
+    struct PageHead
     {
         union
         {
@@ -507,22 +507,22 @@ namespace woomem_cppimpl
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
     };
-    static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 16,
+    static_assert(sizeof(PageHead) == 16 && alignof(PageHead) == 8,
         "PageHead size and alignment must be correct.");
 
-    struct alignas(16) UnitHead
+    struct UnitHead
     {
         /* Used for user free. */
         Page* m_parent_page;
-
-        atomic_uint8_t  m_allocated_status; // 0 = freed, 1 = allocated
 
         uint8_t         m_alloc_timing;
         uint8_t /* woomem_GCUnitType */ m_gc_type;
         uint8_t         m_gc_age;
         atomic_uint8_t  m_gc_marked;
+        /* NOTE: Consider use this field to store unit offset, avoid using m_parent_page */
+        uint16_t        _reserved_;
+        uint16_t        m_next_alloc_unit_offset;
 
-        uint16_t m_next_alloc_unit_offset;
         WOOMEM_FORCE_INLINE void destroy() noexcept
         {
             if (m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_FINALIZER)
@@ -534,7 +534,9 @@ namespace woomem_cppimpl
         }
         WOOMEM_FORCE_INLINE bool try_free_this_unit_head() noexcept
         {
-            if (0 != m_allocated_status.exchange(0, memory_order::memory_order_relaxed))
+            if (WOOMEM_GC_MARKED_RELEASED != m_gc_marked.exchange(
+                WOOMEM_GC_MARKED_RELEASED,
+                memory_order::memory_order_relaxed))
             {
                 destroy();
                 return true;
@@ -543,21 +545,20 @@ namespace woomem_cppimpl
         }
         WOOMEM_FORCE_INLINE void fast_free_unit_manually() noexcept
         {
-            assert(1 == m_allocated_status.load(memory_order::memory_order_relaxed));
-            m_allocated_status.store(0, memory_order::memory_order_relaxed);
+            assert(WOOMEM_GC_MARKED_RELEASED != m_gc_marked.load(memory_order::memory_order_relaxed));
+
+            m_gc_marked.store(WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
             destroy();
         }
         WOOMEM_FORCE_INLINE void init_unit_head() noexcept
         {
-            m_allocated_status.store(0, memory_order::memory_order_relaxed);
-
             /* unit_head->m_alloc_timing will be set when allocate. */
             m_gc_age = NEW_BORN_GC_AGE;
             m_gc_marked.store(
-                WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
+                WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
         }
     };
-    static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 16,
+    static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
         "UnitHead size and alignment must be correct.");
 
     union Page
@@ -612,7 +613,7 @@ namespace woomem_cppimpl
                 UnitHead* const allocating_unit_head =
                     reinterpret_cast<UnitHead*>(&m_entries[next_alloc_unit_head_offset]);
 
-                assert(0 == allocating_unit_head->m_allocated_status.load(
+                assert(WOOMEM_GC_MARKED_RELEASED == allocating_unit_head->m_gc_marked.load(
                     memory_order::memory_order_relaxed));
 
                 /*
@@ -651,7 +652,8 @@ namespace woomem_cppimpl
         void drop_back_unit_in_this_page_asyncly(UnitHead* freeing_unit_head) noexcept
         {
             assert(freeing_unit_head->m_parent_page == this);
-            assert(0 == freeing_unit_head->m_allocated_status.load(memory_order::memory_order_relaxed));
+            assert(WOOMEM_GC_MARKED_RELEASED == freeing_unit_head->m_gc_marked.load(
+                memory_order::memory_order_relaxed));
 
             freeing_unit_head->m_next_alloc_unit_offset =
                 m_page_head.m_freed_unit_head_offset.load(
@@ -1282,7 +1284,7 @@ namespace woomem_cppimpl
         }
         void commit_huge_unit_into_list_step2(HugeUnitHead* huge_unit)
         {
-            assert(1 == huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
+            assert(WOOMEM_GC_MARKED_RELEASED != huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked.load(
                 memory_order::memory_order_relaxed));
 
             huge_unit->m_next_huge_unit = m_huge_units_for_gc_walk_through.load(memory_order::memory_order_relaxed);
@@ -1483,16 +1485,16 @@ namespace woomem_cppimpl
             allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
             allocated_unit->m_gc_type = unit_type_mask;
             allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
-            // 使用 relaxed 因为 m_allocated_status 会使用 release 保证可见性
-            allocated_unit->m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
 
-            // 最后设置 allocated_status，使用 release 确保之前的写入对其他线程可见
+            // 最后设置 m_gc_marked，使用 release 确保之前的写入对其他线程可见
             // 
             // NOTE: 如果不使用 release 序，GC线程可能会在观测到 m_allocated_status 的同时
             //      无法正确读取到分配的元数据；这可能导致 GC 错误判断单元的分配时机导致错误
             //      释放
             //
-            allocated_unit->m_allocated_status.store(1, memory_order::memory_order_release);
+            allocated_unit->m_gc_marked.store(
+                WOOMEM_GC_MARKED_UNMARKED,
+                memory_order::memory_order_release);
         }
 
         // 优化：将分配逻辑拆分，减少热路径的代码大小
@@ -1565,8 +1567,9 @@ namespace woomem_cppimpl
                         reinterpret_cast<UnitHead*>(allocated_unit) - 1;
 
                     assert(allocated_unit_head->m_parent_page == nullptr);
-                    assert(0 == allocated_unit_head->m_allocated_status.load(
-                        memory_order::memory_order_relaxed));
+                    assert(WOOMEM_GC_MARKED_RELEASED
+                        == allocated_unit_head->m_gc_marked.load(
+                            memory_order::memory_order_relaxed));
 
                     init_allocated_unit(allocated_unit_head, unit_type_mask);
                 }
@@ -1578,8 +1581,9 @@ namespace woomem_cppimpl
                 if (WOOMEM_LIKELY(allocated_huge_unit != nullptr))
                 {
                     assert(allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_parent_page == nullptr);
-                    assert(0 == allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_allocated_status.load(
-                        memory_order::memory_order_relaxed));
+                    assert(WOOMEM_GC_MARKED_RELEASED
+                        == allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked.load(
+                            memory_order::memory_order_relaxed));
 
                     init_allocated_unit(
                         &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
@@ -1850,33 +1854,56 @@ namespace woomem_cppimpl
 
             GlobalGrayList      m_global_gray_marking_list;
 
-            static void _validate_address_and_mark_to_gray(
-                void* may_addr, std::vector<UnitHead*>* gray_list) noexcept
+            /*
+            因为 m_addr_to_chunk_table 的快速查找表只能定位到单元，但是不会检查
+            单元本身是否是一个已经分配的内存，到标记时自然能够发现。
+            */
+            WOOMEM_FORCE_INLINE /* OPTIONAL */ UnitHead* _try_get_unit_head(
+                void* may_addr) noexcept
             {
-                /* OPTIONAL */ UnitHead* const unit_head =
-                    g_global_page_collection.m_addr_to_chunk_table.lookup_unit_head(may_addr);
+                return g_global_page_collection.m_addr_to_chunk_table.lookup_unit_head(
+                    may_addr);
+            }
 
-                if (unit_head == nullptr
-                    || 0 == unit_head->m_allocated_status.load(
-                        memory_order::memory_order_relaxed))
+            void _mark_unit_to_gray(
+                UnitHead* unit,
+                vector<UnitHead*>* modified_gray_units_to_continue_mark)
+            {
+                uint8_t expected_state = WOOMEM_GC_MARKED_UNMARKED;
+                if (unit->m_gc_marked.compare_exchange_strong(
+                    expected_state,
+                    WOOMEM_GC_MARKED_SELF_MARKED))
                 {
-                    // Bad unit.
-                    return;
+                    // Marked, send to continue mark list.
+                    modified_gray_units_to_continue_mark->push_back(unit);
                 }
+            }
 
-                // TODO: Check old unit here.
+            bool _pick_all_unit_in_ray_marking_list_and_mark_them(
+                vector<UnitHead*>* modified_gray_units_to_continue_mark) noexcept
+            {
+                auto* const gray_units = m_global_gray_marking_list.pick_all_units();
+                if (gray_units == nullptr)
+                    // All unit in gray list has been marked.
+                    return false;
 
-                uint8_t expected_mark_state = WOOMEM_GC_MARKED_UNMARKED;
-                if (!unit_head->m_gc_marked.compare_exchange_strong(
-                    expected_mark_state,
-                    WOOMEM_GC_MARKED_SELF_MARKED,
-                    memory_order::memory_order_relaxed,
-                    memory_order::memory_order_relaxed))
-                    // This unit has been marked.
-                    return;
+                auto* current_gray_unit = gray_units;
+                do
+                {
+                    // Mark unit to continue marking list.
+                    _mark_unit_to_gray(
+                        current_gray_unit->m_gray_marked_unit,
+                        modified_gray_units_to_continue_mark);
 
-                // Add unit to gray list.
-                gray_list->push_back(unit_head);
+                    // Go next.
+                    current_gray_unit = current_gray_unit->m_last;
+
+                } while (current_gray_unit != nullptr);
+
+                // Drop back units.
+                m_global_gray_marking_list.drop_list(gray_units);
+
+                return true;
             }
 
             void _gc_main_job() noexcept
@@ -1901,12 +1928,11 @@ namespace woomem_cppimpl
                         1）尝试将一个未标记单元储存到 Fullmarked 内存区域中
                         2）尝试将一个新生代单元储存到老年代的内存区域中
                 */
-                // TODO;
+                vector<UnitHead*> continue_marking_list;
+                while (_pick_all_unit_in_ray_marking_list_and_mark_them(&continue_marking_list))
+                {
 
-                // 6. Fullmark 完成，收集此刻的 CollectorContext，进行补充标记
-                /*
-                    循环执行补充标记，直到 CollectorContext 被清空
-                */
+                }
 
                 // 7. 全部标记完成，回收未被标记的单元
             }
@@ -1954,8 +1980,12 @@ namespace woomem_cppimpl
 
             void sending_to_mark_gray(intptr_t may_addr) noexcept
             {
-                // TODO: Check if addr is in blocks?
-                m_global_gray_marking_list.add(may_addr);
+                /* OPTIONAL */ UnitHead* const unit_head =
+                    _try_get_unit_head(reinterpret_cast<void*>(may_addr));
+
+                if (unit_head != nullptr)
+                    // TODO: Check if addr is in blocks?
+                    m_global_gray_marking_list.add(unit_head);
             }
 
             /*

@@ -43,29 +43,28 @@ extern "C" {
     typedef enum woomem_GCMarkedType
     {
         /*
+        此内存单元未被分配
+        */
+        WOOMEM_GC_MARKED_RELEASED = 0,
+
+        /*
         内存分配完成后，以及一轮回收后的状态，表示该内存单元未被标记。如果一个非当前轮次分配的内存单元
         在垃圾回收过程中没有被标记，它将在 woomem_end_gc_mark_and_free_all_unmarked 函数中被释放（除非
         对象已经成为老年代对象，并且此次回收并不考虑老年代）。
         */
-        WOOMEM_GC_MARKED_UNMARKED = 0,
+        WOOMEM_GC_MARKED_UNMARKED = 1,
 
         /*
         此单元已经被初步标记，但其引用的其他内存单元尚未被标记。在垃圾回收过程中，如果一个内存单元
         被标记为 WOOMEM_GC_MARKED_SELF_MARKED，那么之后应当完全扫描其所有元素，然后调用 woomem_full_mark
         将其标记为 WOOMEM_GC_MARKED_FULL_MARKED。
         */
-        WOOMEM_GC_MARKED_SELF_MARKED = 1,
+        WOOMEM_GC_MARKED_SELF_MARKED = 2,
 
         /*
         此单元已经完全被标记，包括其引用的所有内存单元。
         */
-        WOOMEM_GC_MARKED_FULL_MARKED = 2,
-
-        /*
-        该内存单元不应被垃圾回收器释放，其引用的其他单元也不需要标记和释放，通常用于特殊用途的内存单元。
-        外部GC实现可能在特定情况下将其回落标记为 WOOMEM_GC_MARKED_FULL_MARKED。
-        */
-        WOOMEM_GC_MARKED_DONOT_RELEASE = 3,
+        WOOMEM_GC_MARKED_FULL_MARKED = 3,
 
     } woomem_GCMarkedType;
 
