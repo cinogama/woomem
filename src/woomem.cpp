@@ -835,7 +835,8 @@ namespace woomem_cppimpl
                 // Mark multipage offset.
                 for (size_t page_idx = 0; page_idx < need_group_count; ++page_idx)
                 {
-                    m_multipage_offset[new_page_index + page_idx] = page_idx;
+                    m_multipage_offset[new_page_index + page_idx] =
+                        static_cast<uint8_t>(page_idx);
                 }
 
                 // Wait until other threads finish committing.
@@ -1458,7 +1459,7 @@ namespace woomem_cppimpl
         /*
         m_alloc_timing 用于缓存线程局部的 GC 轮次，每次线程检查点时更新此值。
         */
-        uint8_t m_alloc_timing;
+        uint8_t     m_alloc_timing;
 
         /*
         内存分配策略：
@@ -1848,8 +1849,8 @@ namespace woomem_cppimpl
             GCMain& operator = (const GCMain&) = delete;
             GCMain& operator = (GCMain&&) = delete;
 
-            bool                m_gc_in_marking;
             uint8_t             m_gc_timing;
+            atomic_bool         m_gc_in_marking;
 
             bool                m_gc_main_thread_trigger;
             thread              m_gc_main_thread;
@@ -1857,7 +1858,7 @@ namespace woomem_cppimpl
             condition_variable  m_gc_main_thread_trigger_cv;
 
             GlobalGrayList      m_global_gray_marking_list;
-            
+
             /*
             因为 m_addr_to_chunk_table 的快速查找表只能定位到单元，但是不会检查
             单元本身是否是一个已经分配的内存，到标记时自然能够发现。
@@ -1948,6 +1949,7 @@ namespace woomem_cppimpl
             {
                 // 1. GC 开始，更新轮次计数
                 ++m_gc_timing;
+                m_gc_in_marking.store(true, memory_order::memory_order_release);
 
                 // 2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
                 if (g_global_gc_methods.m_root_marking != NULL)
@@ -2014,7 +2016,41 @@ namespace woomem_cppimpl
                 }
 
                 // 6. 全部标记完成，回收未被标记的单元
+                m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
 
+                // Walkthrough all chunks and huge units.
+                Chunk* current_chunk = 
+                    g_global_page_collection.m_current_chunk.load(memory_order::memory_order_relaxed);
+
+                while (current_chunk != nullptr)
+                {
+                    const size_t committed_page_count =
+                        current_chunk->m_commited_page_count.load(memory_order::memory_order_relaxed);
+
+                    for (size_t pid = 0; pid < committed_page_count; ++pid)
+                    {
+                        Page* const current_page = &current_chunk->m_reserved_address_begin[pid];
+
+                        assert(current_page->m_page_head.m_page_belong_to_group != HUGE);
+                        if (current_page->m_page_head.m_page_belong_to_group < LARGE_PAGES_1)
+                        {
+                            // Is normal page.
+                            TODO;
+
+                        }
+                        else
+                        {
+                            // Is large unit page.
+
+
+                            // Move forward to skip current unit.
+                            pid += PAGE_GROUP_NEED_PAGE_COUNTS[
+                                current_page->m_page_head.m_page_belong_to_group] - 1;
+                        }
+                    }
+
+                    current_chunk = current_chunk->m_last_chunk;
+                }
             }
             void _gc_main_thread() noexcept
             {
@@ -2040,10 +2076,10 @@ namespace woomem_cppimpl
             }
 
             GCMain()
-                : m_gc_in_marking(false)
-                , m_gc_timing(0)
+                : m_gc_timing(0)
                 , m_gc_main_thread_trigger(false)
             {
+                m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
                 m_gc_main_thread = thread(&GCMain::_gc_main_thread, this);
             }
             ~GCMain()
@@ -2242,7 +2278,7 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
 
 woomem_Bool woomem_checkpoint(void)
 {
-    if (gc::g_gc_main->m_gc_in_marking)
+    if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_acquire))
     {
         // Sync GC timing.
         t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;

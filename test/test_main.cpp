@@ -609,7 +609,7 @@ int main(void) {
 
     // 初始化内存分配器
     std::cout << "\nInitializing woomem..." << std::endl;
-    woomem_init(nullptr, nullptr, nullptr);
+    woomem_init(nullptr, nullptr, nullptr, nullptr);
     std::cout << "woomem_init completed." << std::endl;
 
     std::cout << "\n========================================" << std::endl;
