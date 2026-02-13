@@ -1308,7 +1308,6 @@ namespace woomem_cppimpl
             {
                 WOOMEM_PAUSE();
             }
-            m_addr_to_chunk_table.add_huge_unit(huge_unit);
         }
 
         void register_thread(ThreadLocalPageCollection* thread_local_page_collection)noexcept
@@ -1467,6 +1466,8 @@ namespace woomem_cppimpl
 
     struct ThreadLocalPageCollection
     {
+        bool        m_is_marking;
+
         /*
         m_alloc_timing 用于缓存线程局部的 GC 轮次，每次线程检查点时更新此值。
         */
@@ -1495,9 +1496,9 @@ namespace woomem_cppimpl
         // 优化：内联初始化单元属性，减少重复代码
         WOOMEM_FORCE_INLINE void init_allocated_unit(
             UnitHead* allocated_unit,
-            uint8_t /* 4bits */ unit_type_mask) noexcept
+            uint8_t unit_type_mask) noexcept
         {
-            allocated_unit->m_alloc_timing = m_alloc_timing & 0x0Fu;
+            allocated_unit->m_alloc_timing = m_alloc_timing;
             allocated_unit->m_gc_type = unit_type_mask;
             allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
 
@@ -1604,6 +1605,7 @@ namespace woomem_cppimpl
                         &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
 
                     g_global_page_collection.commit_huge_unit_into_list_step2(allocated_huge_unit);
+                    g_global_page_collection.m_addr_to_chunk_table.add_huge_unit(allocated_huge_unit);
 
                     return allocated_huge_unit + 1;
                 }
@@ -1735,6 +1737,7 @@ namespace woomem_cppimpl
 
         void reset() noexcept
         {
+            m_is_marking = false;
             m_alloc_timing = 0;
             for (PageGroupType t = PageGroupType::SMALL_8;
                 t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
@@ -2095,7 +2098,30 @@ namespace woomem_cppimpl
                 }
 
                 // Walkthrough all huge units.
-                TODO;
+                HugeUnitHead* current_huge_unit =
+                    g_global_page_collection.m_huge_units_for_gc_walk_through.exchange(
+                        nullptr, memory_order::memory_order_relaxed);
+
+                while (current_huge_unit != nullptr)
+                {
+                    HugeUnitHead* const next_huge_unit = current_huge_unit->m_next_huge_unit;
+
+                    if (current_huge_unit->m_large_page_unit_head.m_unit_head
+                        .is_not_marked_during_this_round_gc(m_gc_timing)
+                        || current_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked
+                        .load(memory_order_relaxed) == WOOMEM_GC_MARKED_RELEASED)
+                    {
+                        g_global_page_collection.m_addr_to_chunk_table.remove_huge_unit(current_huge_unit);
+                        free(current_huge_unit);
+                    }
+                    else
+                    {
+                        // Dropback
+                        g_global_page_collection.commit_huge_unit_into_list_step2(current_huge_unit);
+                    }
+
+                    current_huge_unit = next_huge_unit;
+                }
             }
             void _gc_main_thread() noexcept
             {
@@ -2327,7 +2353,27 @@ woomem_Bool woomem_checkpoint(void)
     {
         // Sync GC timing.
         t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;
+        t_tls_page_collection.m_is_marking = true;
+
         return WOOMEM_BOOL_TRUE;
     }
+    else
+    {
+        // Sync GC state.
+        t_tls_page_collection.m_is_marking = false;
+    }
+
     return WOOMEM_BOOL_FALSE;
+}
+
+void woomem_write_barrier(void* writing_target_unit, void* addr)
+{
+    if (t_tls_page_collection.m_is_marking)
+    {
+        UnitHead* const writing_target_unit_head =
+            reinterpret_cast<UnitHead*>(writing_target_unit) - 1;
+
+        // TODO: 怎么有效地检查正在写入 Black Unit，需要仔细考虑
+        /*if (writing_target_unit_head->m_gc_marked.load()*/
+    }
 }
