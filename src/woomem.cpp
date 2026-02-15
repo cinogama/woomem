@@ -2395,20 +2395,16 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
 
 woomem_Bool woomem_checkpoint(void)
 {
-    if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_acquire))
+    t_tls_page_collection.m_is_marking = 
+        gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_acquire);
+
+    if (t_tls_page_collection.m_is_marking)
     {
         // Sync GC timing.
         t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;
-        t_tls_page_collection.m_is_marking = true;
-
+   
         return WOOMEM_BOOL_TRUE;
     }
-    else
-    {
-        // Sync GC state.
-        t_tls_page_collection.m_is_marking = false;
-    }
-
     return WOOMEM_BOOL_FALSE;
 }
 
