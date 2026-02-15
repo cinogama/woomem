@@ -502,7 +502,7 @@ namespace woomem_cppimpl
 
         // 如果页面彻底耗尽，没有空余单元，此页面将被抛弃，TLS Pool 将尝试重新拉取一个新的 Page
         // m_abondon_page_flag 将在页面被抛弃时设置
-        atomic_uint8_t  m_abondon_page_flag;
+        atomic_bool m_abondon_page_flag;
 
         atomic_uint16_t m_freed_unit_head_offset;
         uint16_t m_next_alloc_unit_head_offset;
@@ -579,7 +579,7 @@ namespace woomem_cppimpl
 
             m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
-            m_page_head.m_abondon_page_flag.store(0, memory_order::memory_order_relaxed);
+            m_page_head.m_abondon_page_flag.store(false, memory_order::memory_order_relaxed);
             m_page_head.m_freed_unit_head_offset.store(0, memory_order::memory_order_relaxed);
 
             const size_t unit_take_size_unit =
@@ -713,7 +713,7 @@ namespace woomem_cppimpl
         {
             m_page_head.m_next_large_unit = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
-            m_page_head.m_abondon_page_flag.store(0, memory_order::memory_order_relaxed);
+            m_page_head.m_abondon_page_flag.store(false, memory_order::memory_order_relaxed);
 
             m_page_head.m_freed_unit_head_offset.store(0, memory_order::memory_order_relaxed);
             m_page_head.m_next_alloc_unit_head_offset = 0;
@@ -1666,7 +1666,7 @@ namespace woomem_cppimpl
                     {
                         // Drop run out page.
                         new_page->m_page_head.m_next_page = next_page->m_page_head.m_next_page;
-                        next_page->m_page_head.m_abondon_page_flag.store(1, memory_order::memory_order_release);
+                        next_page->m_page_head.m_abondon_page_flag.store(true, memory_order::memory_order_release);
                     }
                     current_alloc_page = new_page;
                     continue;
@@ -1866,6 +1866,7 @@ namespace woomem_cppimpl
             uint8_t             m_gc_timing;
             atomic_bool         m_gc_in_marking;
 
+            bool                m_gc_main_thread_stop;
             bool                m_gc_main_thread_trigger;
             thread              m_gc_main_thread;
             mutex               m_gc_main_thread_trigger_mx;
@@ -2041,7 +2042,7 @@ namespace woomem_cppimpl
                     const size_t committed_page_count =
                         current_chunk->m_commited_page_count.load(memory_order::memory_order_relaxed);
 
-                    for (size_t pid = 0; pid < committed_page_count; ++pid)
+                    for (size_t pid = 0; pid < committed_page_count;)
                     {
                         Page* const current_page = &current_chunk->m_reserved_address_begin[pid];
 
@@ -2065,12 +2066,49 @@ namespace woomem_cppimpl
 
                                 if (this_unit_head->is_not_marked_during_this_round_gc(m_gc_timing))
                                 {
-                                    // Unit that need to be sweep didn't marked, and not allocated during this round GC scan.
+                                    // Unit that need to be sweep didn't marked, and not allocated 
+                                    // during this round GC scan.
+                                    // 
                                     // Release it.
 
-                                    this_unit_head->m_parent_page->free_unit_in_this_page_asyncly(this_unit_head);
+                                    this_unit_head->m_parent_page->free_unit_in_this_page_asyncly(
+                                        this_unit_head);
                                 }
                             }
+
+                            // If this page is abondoned, check it's free units
+                            if (current_page->m_page_head.m_abondon_page_flag.load(
+                                memory_order::memory_order_relaxed))
+                            {
+                                // 计数当前页面的总空闲单元数
+                                uint16_t free_unit_count = 0;
+                                uint16_t current_free_offset = current_page->m_page_head.m_freed_unit_head_offset.load(
+                                    memory_order::memory_order_relaxed);
+                                while (current_free_offset != 0)
+                                {
+                                    ++free_unit_count;
+                                    UnitHead* free_unit = reinterpret_cast<UnitHead*>(
+                                        &current_page->m_entries[current_free_offset]);
+                                    current_free_offset = free_unit->m_next_alloc_unit_offset;
+                                }
+
+                                // 如果空闲单元数量超过页面总单元数的一半，则将该页面放回全局空闲页面池
+                                const size_t page_unit_size_with_head =
+                                    UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                                        current_page->m_page_head.m_page_belong_to_group];
+
+                                const size_t total_units_in_page = (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
+                                if (free_unit_count * 2 >= total_units_in_page)
+                                {
+                                    current_page->m_page_head.m_abondon_page_flag.store(
+                                        false, memory_order::memory_order_relaxed);
+
+                                    g_global_page_collection.return_free_page(current_page);
+                                }
+                            }
+
+                            // Move to next page.
+                            ++pid;
                         }
                         else
                         {
@@ -2084,13 +2122,14 @@ namespace woomem_cppimpl
                             {
                                 if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
                                 {
-                                    g_global_page_collection.return_freed_large_unit_asyncly(this_large_unit_head);
+                                    g_global_page_collection.return_freed_large_unit_asyncly(
+                                        this_large_unit_head);
                                 }
                             }
 
                             // Move forward to skip current unit.
                             pid += PAGE_GROUP_NEED_PAGE_COUNTS[
-                                current_page->m_page_head.m_page_belong_to_group] - 1;
+                                current_page->m_page_head.m_page_belong_to_group];
                         }
                     }
 
@@ -2136,8 +2175,11 @@ namespace woomem_cppimpl
                             [this]()
                             {
                                 // TODO: 在此检查 GC 策略
-                                return m_gc_main_thread_trigger;
+                                return m_gc_main_thread_trigger || m_gc_main_thread_stop;
                             });
+
+                        if (m_gc_main_thread_stop)
+                            return;
                     }
                     ug.unlock();
 
@@ -2148,6 +2190,7 @@ namespace woomem_cppimpl
 
             GCMain()
                 : m_gc_timing(0)
+                , m_gc_main_thread_stop(false)
                 , m_gc_main_thread_trigger(false)
             {
                 m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
@@ -2155,6 +2198,9 @@ namespace woomem_cppimpl
             }
             ~GCMain()
             {
+                m_gc_main_thread_stop = true;
+                trigger();
+
                 m_gc_main_thread.join();
             }
 
@@ -2366,14 +2412,17 @@ woomem_Bool woomem_checkpoint(void)
     return WOOMEM_BOOL_FALSE;
 }
 
-void woomem_write_barrier(void* writing_target_unit, void* addr)
+void woomem_write_barrier(void** writing_target_unit, void* addr)
 {
     if (t_tls_page_collection.m_is_marking)
     {
-        UnitHead* const writing_target_unit_head =
-            reinterpret_cast<UnitHead*>(writing_target_unit) - 1;
-
-        // TODO: 怎么有效地检查正在写入 Black Unit，需要仔细考虑
-        /*if (writing_target_unit_head->m_gc_marked.load()*/
+        if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
+        {
+            woomem_try_mark_unit(reinterpret_cast<intptr_t>(*writing_target_unit));
+            woomem_try_mark_unit(reinterpret_cast<intptr_t>(addr));
+        }
+        else
+            t_tls_page_collection.m_is_marking = false;
     }
+    *writing_target_unit = addr;
 }

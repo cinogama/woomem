@@ -113,6 +113,8 @@ extern "C" {
     */
     void woomem_try_mark_unit(intptr_t address_may_invalid);
 
+    void woomem_write_barrier(void** writing_target_unit, void* addr);
+
 #ifdef __cplusplus
 }
 #endif
