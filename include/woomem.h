@@ -15,7 +15,8 @@ extern "C" {
         /* OPTIONAL */ woomem_UserContext user_ctx,
         /* OPTIONAL */ woomem_MarkCallbackFunc marker,
         /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer,
-        /* OPTIONAL */ woomem_RootMarkingFunc root_marking);
+        /* OPTIONAL */ woomem_RootMarkingFunc start_marking,
+        /* OPTIONAL */ woomem_RootMarkingFunc stop_marking);
     void woomem_shutdown(void);
 
     /*
@@ -81,7 +82,7 @@ extern "C" {
     分配指定大小的内存单元，并返回指向该内存单元的指针。
     */
     /* OPTIONAL */ void* woomem_alloc_normal(size_t size);
-    /* OPTIONAL */ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib);
+    /* OPTIONAL */ void* woomem_alloc_attrib(size_t size, int attrib);
 
     /*
     重新分配给定的内存单元为新的大小，并返回新的指针。
@@ -113,7 +114,9 @@ extern "C" {
     */
     void woomem_try_mark_unit(intptr_t address_may_invalid);
 
-    void woomem_write_barrier(void** writing_target_unit, void* addr);
+    void woomem_delete_barrier(void* addr);
+
+    void woomem_write_barrier_mixed(void** writing_target_unit, void* addr);
 
 #ifdef __cplusplus
 }

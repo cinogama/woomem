@@ -169,7 +169,8 @@ namespace woomem_cppimpl
 
             woomem_MarkCallbackFunc     m_marker;
             woomem_DestroyCallbackFunc  m_destroyer;
-            woomem_RootMarkingFunc      m_root_marking;
+            woomem_RootMarkingFunc      m_start_marking;
+            woomem_RootMarkingFunc      m_stop_marking;
         };
         GlobalGCMethods g_global_gc_methods;
     }
@@ -1415,20 +1416,29 @@ namespace woomem_cppimpl
                 return dropped_node;
             }
 
-            void add(UnitHead* unit_head) noexcept
+            void try_mark_gray_and_add(UnitHead* unit_head) noexcept
             {
-                GrayUnit* unit = _get_usable_node();
-
-                unit->m_gray_marked_unit = unit_head;
-                unit->m_last = m_list.load(memory_order_relaxed);
-
-                while (!m_list.compare_exchange_weak(
-                    unit->m_last,
-                    unit,
+                uint8_t expected_state = WOOMEM_GC_MARKED_UNMARKED;
+                if (unit_head->m_gc_marked.compare_exchange_strong(
+                    expected_state,
+                    WOOMEM_GC_MARKED_SELF_MARKED,
                     memory_order::memory_order_relaxed,
                     memory_order::memory_order_relaxed))
                 {
-                    WOOMEM_PAUSE();
+                    // Self marked successfully.
+                    GrayUnit* unit = _get_usable_node();
+
+                    unit->m_gray_marked_unit = unit_head;
+                    unit->m_last = m_list.load(memory_order_relaxed);
+
+                    while (!m_list.compare_exchange_weak(
+                        unit->m_last,
+                        unit,
+                        memory_order::memory_order_relaxed,
+                        memory_order::memory_order_relaxed))
+                    {
+                        WOOMEM_PAUSE();
+                    }
                 }
             }
             void drop_list(GrayUnit* drop_unit_list) noexcept
@@ -1945,9 +1955,8 @@ namespace woomem_cppimpl
                 do
                 {
                     // Mark unit to continue marking list.
-                    _mark_unit_to_gray(
-                        current_gray_unit->m_gray_marked_unit,
-                        modified_gray_units_to_continue_mark);
+                    modified_gray_units_to_continue_mark->push_back(
+                        current_gray_unit->m_gray_marked_unit);
 
                     // Go next.
                     current_gray_unit = current_gray_unit->m_last;
@@ -1960,29 +1969,8 @@ namespace woomem_cppimpl
                 return true;
             }
 
-            void _gc_main_job() noexcept
+            void _mark_to_dark_job() noexcept
             {
-                // 1. GC 开始，更新轮次计数
-                ++m_gc_timing;
-                m_gc_in_marking.store(true, memory_order::memory_order_release);
-
-                // 2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
-                if (g_global_gc_methods.m_root_marking != NULL)
-                    g_global_gc_methods.m_root_marking(g_global_gc_methods.m_user_ctx);
-
-                // 3. 标记 WOOMEM 的根对象
-                // TODO;
-
-                // 4. 根据 Cardtable，标记老年代对象中的新生代对象
-                // TODO;
-
-                // 5. 起始标记完成，收集此刻的 CollectorContext，进行 Fullmark
-                /*
-                    * fullmark 期间，其他线程可能因写屏障，继续向 CollectorContext 中追加待标记节点
-                    * 以下情况可以发生待标记节点的追加：
-                        1）尝试将一个未标记单元储存到 Fullmarked 内存区域中
-                        2）尝试将一个新生代单元储存到老年代的内存区域中
-                */
                 vector<UnitHead*> continue_marking_list;
                 while (_pick_all_unit_in_ray_marking_list_and_mark_them(
                     &continue_marking_list))
@@ -2029,10 +2017,37 @@ namespace woomem_cppimpl
                         }
                     }
                 }
+            }
 
-                // 6. 全部标记完成，回收未被标记的单元
-                m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
+            void _gc_main_job() noexcept
+            {
+                // 1. GC 开始，更新轮次计数
+                ++m_gc_timing;
+                m_gc_in_marking.store(true, memory_order::memory_order_release);
 
+                // 2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
+                if (g_global_gc_methods.m_start_marking != NULL)
+                    g_global_gc_methods.m_start_marking(g_global_gc_methods.m_user_ctx);
+
+                // 3. 标记 WOOMEM 的根对象
+                // TODO;
+
+                // 4. 根据 Cardtable，标记老年代对象中的新生代对象
+                // TODO;
+
+                // 5. 起始标记完成，收集此刻的 CollectorContext，进行 Fullmark
+                _mark_to_dark_job();
+
+                // 6. 全部标记完成，调用终止检查点回调
+                m_gc_in_marking.store(false, memory_order::memory_order_release);
+
+                if (g_global_gc_methods.m_stop_marking != NULL)
+                    g_global_gc_methods.m_stop_marking(g_global_gc_methods.m_user_ctx);
+
+                // 7. 最终标记，收尾
+                _mark_to_dark_job();
+
+                // 8. 开始回收
                 // Walkthrough all chunks and huge units.
                 Chunk* current_chunk =
                     g_global_page_collection.m_current_chunk.load(memory_order::memory_order_relaxed);
@@ -2219,7 +2234,7 @@ namespace woomem_cppimpl
 
                 if (unit_head != nullptr)
                     // TODO: Check if addr is in blocks?
-                    m_global_gray_marking_list.add(unit_head);
+                    m_global_gray_marking_list.try_mark_gray_and_add(unit_head);
             }
 
             /*
@@ -2256,10 +2271,11 @@ namespace woomem_cppimpl
 using namespace woomem_cppimpl;
 
 void woomem_init(
-    woomem_UserContext user_ctx,
-    woomem_MarkCallbackFunc marker,
-    woomem_DestroyCallbackFunc destroyer,
-    woomem_RootMarkingFunc root_marking)
+    /* OPTIONAL */ woomem_UserContext user_ctx,
+    /* OPTIONAL */ woomem_MarkCallbackFunc marker,
+    /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer,
+    /* OPTIONAL */ woomem_RootMarkingFunc start_marking,
+    /* OPTIONAL */ woomem_RootMarkingFunc stop_marking)
 {
     assert(g_global_page_collection.m_current_chunk.load(
         memory_order::memory_order_acquire) == nullptr);
@@ -2281,7 +2297,8 @@ void woomem_init(
     gc::g_global_gc_methods.m_user_ctx = user_ctx;
     gc::g_global_gc_methods.m_marker = marker;
     gc::g_global_gc_methods.m_destroyer = destroyer;
-    gc::g_global_gc_methods.m_root_marking = root_marking;
+    gc::g_global_gc_methods.m_start_marking = start_marking;
+    gc::g_global_gc_methods.m_stop_marking = stop_marking;
 
     g_global_page_collection.m_current_chunk.store(
         Chunk::create_new_chunk(), memory_order::memory_order_release);
@@ -2302,7 +2319,7 @@ void woomem_shutdown(void)
 {
     return t_tls_page_collection.alloc(size, 0);
 }
-void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
+void* woomem_alloc_attrib(size_t size, int attrib)
 {
     return t_tls_page_collection.alloc(size, static_cast<uint8_t>(attrib));
 }
@@ -2370,6 +2387,21 @@ void* woomem_alloc_attrib(size_t size, woomem_GCUnitTypeMask attrib)
     // 复制数据：复制 min(old_unit_size, new_size) 字节
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
 
+    // In marking, mark new unit before freeing old.
+    if (t_tls_page_collection.m_is_marking)
+    {
+        if (WOOMEM_GC_MARKED_FULL_MARKED !=
+            old_unit_head->m_gc_marked.load(memory_order::memory_order_relaxed))
+        {
+            if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
+            {
+                woomem_try_mark_unit(reinterpret_cast<intptr_t>(new_ptr));
+            }
+            else
+                t_tls_page_collection.m_is_marking = false;
+        }
+    }
+
     // 释放旧内存
     woomem_free(ptr);
 
@@ -2395,20 +2427,33 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
 
 woomem_Bool woomem_checkpoint(void)
 {
-    t_tls_page_collection.m_is_marking = 
+    t_tls_page_collection.m_is_marking =
         gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_acquire);
 
     if (t_tls_page_collection.m_is_marking)
     {
         // Sync GC timing.
         t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;
-   
+
         return WOOMEM_BOOL_TRUE;
     }
     return WOOMEM_BOOL_FALSE;
 }
 
-void woomem_write_barrier(void** writing_target_unit, void* addr)
+void woomem_delete_barrier(void* addr)
+{
+    if (t_tls_page_collection.m_is_marking)
+    {
+        if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
+        {
+            woomem_try_mark_unit(reinterpret_cast<intptr_t>(addr));
+        }
+        else
+            t_tls_page_collection.m_is_marking = false;
+    }
+}
+
+void woomem_write_barrier_mixed(void** writing_target_unit, void* addr)
 {
     if (t_tls_page_collection.m_is_marking)
     {
