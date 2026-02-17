@@ -2388,7 +2388,8 @@ void* woomem_alloc_attrib(size_t size, int attrib)
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
 
     // In marking, mark new unit before freeing old.
-    if (t_tls_page_collection.m_is_marking)
+    if (t_tls_page_collection.m_is_marking &&
+        (old_unit_head->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK))
     {
         if (WOOMEM_GC_MARKED_FULL_MARKED !=
             old_unit_head->m_gc_marked.load(memory_order::memory_order_relaxed))
