@@ -2426,6 +2426,13 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
         address_may_invalid);
 }
 
+void woomem_try_mark_unit_range(
+    intptr_t address_may_invalid,
+    intptr_t address_ending_place)
+{
+    todo;
+}
+
 woomem_Bool woomem_checkpoint(void)
 {
     t_tls_page_collection.m_is_marking =
