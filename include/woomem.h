@@ -105,18 +105,9 @@ extern "C" {
     woomem_Bool woomem_checkpoint(void);
 
     /*
-    使用此方法标记疑似单元的起始地址
-    */
-    // void woomem_try_mark_unit_head(intptr_t address_may_invalid);
-
-    /*
     使用此方法标记疑似单元
     */
     void woomem_try_mark_unit(intptr_t address_may_invalid);
-
-    void woomem_try_mark_unit_range(
-        intptr_t address_may_invalid,
-        intptr_t address_ending_place);
 
     void woomem_delete_barrier(void* addr);
 

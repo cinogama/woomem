@@ -2229,6 +2229,10 @@ namespace woomem_cppimpl
 
             void sending_to_mark_gray(intptr_t may_addr) noexcept
             {
+                if (may_addr == 0)
+                    // Not valid unit.
+                    return;
+
                 /* OPTIONAL */ UnitHead* const unit_head =
                     _try_get_unit_head(reinterpret_cast<void*>(may_addr));
 
@@ -2237,19 +2241,19 @@ namespace woomem_cppimpl
                     m_global_gray_marking_list.try_mark_gray_and_add(unit_head);
             }
 
-            /*
-            fastcheck_and_sending_to_mark_gray 被用于检查和准备标记一些指向单元开头的
-            指针；此处将使用掩码检查对齐情况，注意：如果一个指针指向一个分配空间的中间
-            而非开头，不能使用此方法标记，这可能导致这些单元被错误地过滤掉。
-            */
-            void fastcheck_and_sending_to_mark_gray(intptr_t may_addr) noexcept
-            {
-                if (may_addr == 0 || may_addr & (BASE_ALIGNMENT - 1))
-                    // Bad address, not a valid unit head.
-                    return;
+            ///*
+            //fastcheck_and_sending_to_mark_gray 被用于检查和准备标记一些指向单元开头的
+            //指针；此处将使用掩码检查对齐情况，注意：如果一个指针指向一个分配空间的中间
+            //而非开头，不能使用此方法标记，这可能导致这些单元被错误地过滤掉。
+            //*/
+            //void fastcheck_and_sending_to_mark_gray(intptr_t may_addr) noexcept
+            //{
+            //    if (may_addr == 0 || may_addr & (BASE_ALIGNMENT - 1))
+            //        // Bad address, not a valid unit head.
+            //        return;
 
-                sending_to_mark_gray(may_addr);
-            }
+            //    sending_to_mark_gray(may_addr);
+            //}
         };
         GCMain* g_gc_main = nullptr;
 
@@ -2414,23 +2418,10 @@ void woomem_free(void* ptr)
     t_tls_page_collection.free(ptr);
 }
 
-void woomem_try_mark_unit_head(intptr_t address_may_invalid)
-{
-    gc::g_gc_main->fastcheck_and_sending_to_mark_gray(
-        address_may_invalid);
-}
-
 void woomem_try_mark_unit(intptr_t address_may_invalid)
 {
     gc::g_gc_main->sending_to_mark_gray(
         address_may_invalid);
-}
-
-void woomem_try_mark_unit_range(
-    intptr_t address_may_invalid,
-    intptr_t address_ending_place)
-{
-    todo;
 }
 
 woomem_Bool woomem_checkpoint(void)
