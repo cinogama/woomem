@@ -109,6 +109,11 @@ extern "C" {
     */
     void woomem_try_mark_unit(intptr_t address_may_invalid);
 
+    /*
+    使用此方法标记明确的单元起始地址
+    */
+    void woomem_mark_unit(void* unit_address);
+
     void woomem_delete_barrier(void* addr);
 
     void woomem_write_barrier_mixed(void** writing_target_unit, void* addr);

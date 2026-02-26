@@ -558,10 +558,13 @@ namespace woomem_cppimpl
             m_gc_marked.store(
                 WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
         }
-        WOOMEM_FORCE_INLINE bool is_not_marked_during_this_round_gc(uint8_t gc_timing) const noexcept
+        WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status(
+            uint8_t gc_timing) noexcept
         {
-            return m_gc_marked.load(memory_order::memory_order_relaxed) == WOOMEM_GC_MARKED_UNMARKED
-                && (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
+            return 
+                m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP
+                && m_gc_marked.exchange(
+                    WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed) == WOOMEM_GC_MARKED_UNMARKED
                 && m_gc_age != gc_timing;
         }
     };
@@ -2079,7 +2082,7 @@ namespace woomem_cppimpl
 
                                 assert(this_unit_head->m_parent_page == current_page);
 
-                                if (this_unit_head->is_not_marked_during_this_round_gc(m_gc_timing))
+                                if (this_unit_head->check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
                                 {
                                     // Unit that need to be sweep didn't marked, and not allocated 
                                     // during this round GC scan.
@@ -2133,7 +2136,7 @@ namespace woomem_cppimpl
 
                             assert(this_large_unit_head->m_unit_head.m_parent_page == nullptr);
 
-                            if (this_large_unit_head->m_unit_head.is_not_marked_during_this_round_gc(m_gc_timing))
+                            if (this_large_unit_head->m_unit_head.check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
                             {
                                 if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
                                 {
@@ -2161,7 +2164,7 @@ namespace woomem_cppimpl
                     HugeUnitHead* const next_huge_unit = current_huge_unit->m_next_huge_unit;
 
                     if (current_huge_unit->m_large_page_unit_head.m_unit_head
-                        .is_not_marked_during_this_round_gc(m_gc_timing)
+                        .check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing)
                         || current_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked
                         .load(memory_order_relaxed) == WOOMEM_GC_MARKED_RELEASED)
                     {
@@ -2422,6 +2425,12 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
 {
     gc::g_gc_main->sending_to_mark_gray(
         address_may_invalid);
+}
+
+void woomem_mark_unit(void* unit_address)
+{
+    gc::g_gc_main->m_global_gray_marking_list.try_mark_gray_and_add(
+        ((UnitHead*)unit_address) - 1);
 }
 
 woomem_Bool woomem_checkpoint(void)
