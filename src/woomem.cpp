@@ -242,7 +242,7 @@ namespace woomem_cppimpl
 
         TOTAL_GROUP_COUNT,
 
-        HUGE = TOTAL_GROUP_COUNT,
+        HUGE_UNIT = TOTAL_GROUP_COUNT,
     };
     constexpr size_t PAGE_GROUP_NEED_PAGE_COUNTS[] =
     {
@@ -479,7 +479,7 @@ namespace woomem_cppimpl
             return static_cast<PageGroupType>(
                 LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) >> 5 /* div PAGE_SIZE */));
         }
-        return HUGE;
+        return HUGE_UNIT;
     }
 
     union Page;
@@ -978,7 +978,7 @@ namespace woomem_cppimpl
             m_page_index_in_chunk is uselese for HugeUnit.
             */
             /* m_large_page_unit_head.m_page_head.m_page_index_in_chunk = 0 */;
-            m_large_page_unit_head.init_for_large_page_unit(PageGroupType::HUGE);
+            m_large_page_unit_head.init_for_large_page_unit(PageGroupType::HUGE_UNIT);
 
             /*
             Reset cardtable masks.
@@ -1123,14 +1123,14 @@ namespace woomem_cppimpl
         // FAST_AND_MIDIUM_GROUP_COUNT 项并不使用，仅作占位（避免每次都减去这些值）。
         atomic<LargePageUnitHead*> m_free_large_unit_list[TOTAL_GROUP_COUNT];
 
-        // HUGE 对象并不使用 Page 进行管理，释放操作也应当立即发生。
-        // TODO: 需要考虑如何高效地，在有 HUGE 对象的情况下，能够快速校验地址是否合法。
+        // HUGE_UNIT 对象并不使用 Page 进行管理，释放操作也应当立即发生。
+        // TODO: 需要考虑如何高效地，在有 HUGE_UNIT 对象的情况下，能够快速校验地址是否合法。
         /*
         m_huge_units_for_gc_walk_through 用于储存当前已经分配出的所有巨大节点，在（且
         仅在）GC的释放操作完成后，由GC线程负责整理此列表，排除所有未被分配的节点。
 
         此表仅用于GC标记时，遍历所有尚处于存活状态的巨大节点，然后标记它们的 CardTable。
-        因为 HUGE 单元的 CardTable 是独立的
+        因为 HUGE_UNIT 单元的 CardTable 是独立的
         */
         atomic<HugeUnitHead*> m_huge_units_for_gc_walk_through;
 
@@ -1226,7 +1226,7 @@ namespace woomem_cppimpl
 
         void return_freed_large_unit_asyncly(LargePageUnitHead* large_unit_head) noexcept
         {
-            assert(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE);
+            assert(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE_UNIT);
 
             auto& large_unit_list = m_free_large_unit_list[
                 large_unit_head->m_page_head.m_page_belong_to_group];
@@ -1583,9 +1583,9 @@ namespace woomem_cppimpl
                 }
                 return alloc_slow_path(alloc_group, unit_type_mask);
             }
-            else if (alloc_group != PageGroupType::HUGE)
+            else if (alloc_group != PageGroupType::HUGE_UNIT)
             {
-                assert(alloc_group < PageGroupType::HUGE);
+                assert(alloc_group < PageGroupType::HUGE_UNIT);
 
                 void* const allocated_unit =
                     g_global_page_collection.try_alloc_large_unit(alloc_group);
@@ -1719,12 +1719,12 @@ namespace woomem_cppimpl
                 LargePageUnitHead* const large_unit_head =
                     reinterpret_cast<LargePageUnitHead*>(unit) - 1;
 
-                if (WOOMEM_LIKELY(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE))
+                if (WOOMEM_LIKELY(large_unit_head->m_page_head.m_page_belong_to_group != PageGroupType::HUGE_UNIT))
                 {
                     // 大对象，返回到全局大对象池
                     g_global_page_collection.return_freed_large_unit_asyncly(large_unit_head);
                 }
-                // Or: HUGE 对象，分配标记已经解除；确实的释放操作将由GC负责，此处啥也不做
+                // Or: HUGE_UNIT 对象，分配标记已经解除；确实的释放操作将由GC负责，此处啥也不做
             }
         }
 
@@ -1911,7 +1911,7 @@ namespace woomem_cppimpl
                     LargePageUnitHead* const large_page_unit_head =
                         reinterpret_cast<LargePageUnitHead*>(unit_head + 1) - 1;
 
-                    if (WOOMEM_LIKELY(large_page_unit_head->m_page_head.m_page_belong_to_group != HUGE))
+                    if (WOOMEM_LIKELY(large_page_unit_head->m_page_head.m_page_belong_to_group != HUGE_UNIT))
                     {
                         // Is large unit
                         return UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
@@ -2064,7 +2064,7 @@ namespace woomem_cppimpl
                     {
                         Page* const current_page = &current_chunk->m_reserved_address_begin[pid];
 
-                        assert(current_page->m_page_head.m_page_belong_to_group != HUGE);
+                        assert(current_page->m_page_head.m_page_belong_to_group != HUGE_UNIT);
                         if (current_page->m_page_head.m_page_belong_to_group < LARGE_PAGES_1)
                         {
                             // Is normal page.
@@ -2353,11 +2353,11 @@ void* woomem_alloc_attrib(size_t size, int attrib)
         // 如果差距小于2级，保持原分配不变（避免内存抖动）
         if (group_diff < 2)
         {
-            if (WOOMEM_LIKELY(old_group_type != PageGroupType::HUGE))
+            if (WOOMEM_LIKELY(old_group_type != PageGroupType::HUGE_UNIT))
                 return ptr;
             else
             {
-                // HUGE 单元的尺寸规则和其他单元不大一样，需要特别处理一下
+                // HUGE_UNIT 单元的尺寸规则和其他单元不大一样，需要特别处理一下
                 HugeUnitHead* const old_huge_unit_head =
                     reinterpret_cast<HugeUnitHead*>(ptr) - 1;
 
@@ -2387,7 +2387,7 @@ void* woomem_alloc_attrib(size_t size, int attrib)
     }
 
     // 获取旧的实际分配大小
-    const size_t old_unit_size = (old_group_type < PageGroupType::HUGE)
+    const size_t old_unit_size = (old_group_type < PageGroupType::HUGE_UNIT)
         ? UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[old_group_type]
         : (reinterpret_cast<HugeUnitHead*>(ptr) - 1)->m_fact_unit_size;
 
