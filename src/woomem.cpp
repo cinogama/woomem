@@ -2477,9 +2477,7 @@ void woomem_delete_barrier(void* addr)
     if (t_tls_page_collection.m_is_marking)
     {
         if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
-        {
             woomem_try_mark_unit(reinterpret_cast<intptr_t>(addr));
-        }
         else
             t_tls_page_collection.m_is_marking = false;
     }
