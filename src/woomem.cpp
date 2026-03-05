@@ -561,11 +561,27 @@ namespace woomem_cppimpl
         WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status(
             uint8_t gc_timing) noexcept
         {
-            return 
-                m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP
-                && m_gc_marked.exchange(
-                    WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed) == WOOMEM_GC_MARKED_UNMARKED
-                && m_gc_age != gc_timing;
+            if (0 == (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
+                || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == gc_timing))
+                // Unit not need to sweep, or it allocated during this gc round, skip this unit.
+                return false;
+
+            const uint8_t marked_status = 
+                m_gc_marked.load(memory_order::memory_order_relaxed);
+
+            // NOTE: Unit here cannot be marked uncomplete.
+            assert(marked_status != WOOMEM_GC_MARKED_SELF_MARKED);
+
+            if (marked_status == WOOMEM_GC_MARKED_UNMARKED)
+                // Not marked.
+                return true;
+
+            if (marked_status != WOOMEM_GC_MARKED_RELEASED)
+            {
+                // Reset marking state.
+                m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
+            }
+            return false;
         }
     };
     static_assert(sizeof(UnitHead) == 16 && alignof(UnitHead) == 8,
@@ -1978,47 +1994,51 @@ namespace woomem_cppimpl
                 while (_pick_all_unit_in_ray_marking_list_and_mark_them(
                     &continue_marking_list))
                 {
-                    vector<UnitHead*> current_marking_list;
-                    current_marking_list.swap(continue_marking_list);
-
-                    for (auto* unit_to_mark : current_marking_list)
+                    do
                     {
-                        uint8_t expected_state = WOOMEM_GC_MARKED_SELF_MARKED;
-                        if (!unit_to_mark->m_gc_marked.compare_exchange_strong(
-                            expected_state,
-                            WOOMEM_GC_MARKED_FULL_MARKED,
-                            memory_order::memory_order_relaxed,
-                            memory_order::memory_order_relaxed))
-                        {
-                            // This unit has been marked as black or has been freed manually.
-                            assert(expected_state == WOOMEM_GC_MARKED_FULL_MARKED
-                                || expected_state == WOOMEM_GC_MARKED_RELEASED);
-                            continue;
-                        }
+                        vector<UnitHead*> current_marking_list;
+                        current_marking_list.swap(continue_marking_list);
 
-                        if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK)
+                        for (auto* unit_to_mark : current_marking_list)
                         {
-                            // Need auto mark.
-                            const size_t unit_fact_step = _get_unit_fact_size(unit_to_mark) / sizeof(void*);
-                            void** const unit_storages = reinterpret_cast<void**>(unit_to_mark + 1);
-
-                            for (size_t i = 0; i < unit_fact_step; ++i)
+                            uint8_t expected_state = WOOMEM_GC_MARKED_SELF_MARKED;
+                            if (!unit_to_mark->m_gc_marked.compare_exchange_strong(
+                                expected_state,
+                                WOOMEM_GC_MARKED_FULL_MARKED,
+                                memory_order::memory_order_relaxed,
+                                memory_order::memory_order_relaxed))
                             {
-                                UnitHead* const child_unit_to_mark =
-                                    _try_get_unit_head(unit_storages[i]);
+                                // This unit has been marked as black or has been freed manually.
+                                assert(expected_state == WOOMEM_GC_MARKED_FULL_MARKED
+                                    || expected_state == WOOMEM_GC_MARKED_RELEASED);
+                                continue;
+                            }
 
-                                if (child_unit_to_mark != nullptr)
-                                    _mark_unit_to_gray(child_unit_to_mark, &continue_marking_list);
+                            if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK)
+                            {
+                                // Need auto mark.
+                                const size_t unit_fact_step = _get_unit_fact_size(unit_to_mark) / sizeof(void*);
+                                void** const unit_storages = reinterpret_cast<void**>(unit_to_mark + 1);
+
+                                for (size_t i = 0; i < unit_fact_step; ++i)
+                                {
+                                    UnitHead* const child_unit_to_mark =
+                                        _try_get_unit_head(unit_storages[i]);
+
+                                    if (child_unit_to_mark != nullptr)
+                                        _mark_unit_to_gray(child_unit_to_mark, &continue_marking_list);
+                                }
+                            }
+                            if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_MARKER)
+                            {
+                                // Need to mark by user callback.
+                                g_global_gc_methods.m_marker(
+                                    g_global_gc_methods.m_user_ctx,
+                                    unit_to_mark + 1);
                             }
                         }
-                        if (unit_to_mark->m_gc_type & WOOMEM_GC_UNIT_TYPE_HAS_MARKER)
-                        {
-                            // Need to mark by user callback.
-                            g_global_gc_methods.m_marker(
-                                g_global_gc_methods.m_user_ctx,
-                                unit_to_mark + 1);
-                        }
-                    }
+
+                    } while (!continue_marking_list.empty());
                 }
             }
 
@@ -2136,7 +2156,8 @@ namespace woomem_cppimpl
 
                             assert(this_large_unit_head->m_unit_head.m_parent_page == nullptr);
 
-                            if (this_large_unit_head->m_unit_head.check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
+                            if (this_large_unit_head->m_unit_head
+                                .check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
                             {
                                 if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
                                 {
@@ -2307,8 +2328,11 @@ void woomem_init(
     gc::g_global_gc_methods.m_start_marking = start_marking;
     gc::g_global_gc_methods.m_stop_marking = stop_marking;
 
+    Chunk* const init_chunk = Chunk::create_new_chunk();
+    g_global_page_collection.m_addr_to_chunk_table.add_new_chunk(init_chunk);
+
     g_global_page_collection.m_current_chunk.store(
-        Chunk::create_new_chunk(), memory_order::memory_order_release);
+        init_chunk, memory_order::memory_order_release);
 
     // GC start.
     gc::init();
