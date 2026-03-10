@@ -19,6 +19,9 @@
 #include <condition_variable>
 #include <chrono>
 
+woomem_Bool g_gc_in_marking;
+uint8_t g_gc_timing;
+
 using namespace std;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -558,11 +561,10 @@ namespace woomem_cppimpl
             m_gc_marked.store(
                 WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
         }
-        WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status(
-            uint8_t gc_timing) noexcept
+        WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status() noexcept
         {
             if (0 == (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
-                || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == gc_timing))
+                || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == g_gc_timing))
                 // Unit not need to sweep, or it allocated during this gc round, skip this unit.
                 return false;
 
@@ -1495,13 +1497,6 @@ namespace woomem_cppimpl
 
     struct ThreadLocalPageCollection
     {
-        bool        m_is_marking;
-
-        /*
-        m_alloc_timing 用于缓存线程局部的 GC 轮次，每次线程检查点时更新此值。
-        */
-        uint8_t     m_alloc_timing;
-
         /*
         内存分配策略：
         ThreadLocalPageCollection 针对每一个分配组都缓存若干个 Page；如果某次分配中，页面报告其自身简单耗尽，
@@ -1527,7 +1522,7 @@ namespace woomem_cppimpl
             UnitHead* allocated_unit,
             uint8_t unit_type_mask) noexcept
         {
-            allocated_unit->m_alloc_timing = m_alloc_timing;
+            allocated_unit->m_alloc_timing = g_gc_timing;
             allocated_unit->m_gc_type = unit_type_mask;
             allocated_unit->m_gc_age = NEW_BORN_GC_AGE;
 
@@ -1766,8 +1761,6 @@ namespace woomem_cppimpl
 
         void reset() noexcept
         {
-            m_is_marking = false;
-            m_alloc_timing = 0;
             for (PageGroupType t = PageGroupType::SMALL_8;
                 t < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT;
                 t = static_cast<PageGroupType>(static_cast<uint8_t>(t + 1)))
@@ -1891,9 +1884,6 @@ namespace woomem_cppimpl
             GCMain(GCMain&&) = delete;
             GCMain& operator = (const GCMain&) = delete;
             GCMain& operator = (GCMain&&) = delete;
-
-            uint8_t             m_gc_timing;
-            atomic_bool         m_gc_in_marking;
 
             bool                m_gc_main_thread_stop;
             bool                m_gc_main_thread_trigger;
@@ -2045,8 +2035,8 @@ namespace woomem_cppimpl
             void _gc_main_job() noexcept
             {
                 // 1. GC 开始，更新轮次计数
-                ++m_gc_timing;
-                m_gc_in_marking.store(true, memory_order::memory_order_release);
+                ++g_gc_timing;
+                g_gc_in_marking = WOOMEM_BOOL_TRUE;
 
                 // 2. 调用注册的 GC 开始回调函数，此回调函数将负责起始标记，并阻塞到根对象标记完成；
                 if (g_global_gc_methods.m_start_marking != NULL)
@@ -2062,7 +2052,7 @@ namespace woomem_cppimpl
                 _mark_to_dark_job();
 
                 // 6. 全部标记完成，调用终止检查点回调
-                m_gc_in_marking.store(false, memory_order::memory_order_release);
+                g_gc_in_marking = WOOMEM_BOOL_FALSE;
 
                 if (g_global_gc_methods.m_stop_marking != NULL)
                     g_global_gc_methods.m_stop_marking(g_global_gc_methods.m_user_ctx);
@@ -2102,7 +2092,7 @@ namespace woomem_cppimpl
 
                                 assert(this_unit_head->m_parent_page == current_page);
 
-                                if (this_unit_head->check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
+                                if (this_unit_head->check_is_not_marked_during_this_round_gc_and_reset_mark_status())
                                 {
                                     // Unit that need to be sweep didn't marked, and not allocated 
                                     // during this round GC scan.
@@ -2157,7 +2147,7 @@ namespace woomem_cppimpl
                             assert(this_large_unit_head->m_unit_head.m_parent_page == nullptr);
 
                             if (this_large_unit_head->m_unit_head
-                                .check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing))
+                                .check_is_not_marked_during_this_round_gc_and_reset_mark_status())
                             {
                                 if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
                                 {
@@ -2185,7 +2175,7 @@ namespace woomem_cppimpl
                     HugeUnitHead* const next_huge_unit = current_huge_unit->m_next_huge_unit;
 
                     if (current_huge_unit->m_large_page_unit_head.m_unit_head
-                        .check_is_not_marked_during_this_round_gc_and_reset_mark_status(m_gc_timing)
+                        .check_is_not_marked_during_this_round_gc_and_reset_mark_status()
                         || current_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked
                         .load(memory_order_relaxed) == WOOMEM_GC_MARKED_RELEASED)
                     {
@@ -2228,11 +2218,9 @@ namespace woomem_cppimpl
             }
 
             GCMain()
-                : m_gc_timing(0)
-                , m_gc_main_thread_stop(false)
+                : m_gc_main_thread_stop(false)
                 , m_gc_main_thread_trigger(false)
             {
-                m_gc_in_marking.store(false, memory_order::memory_order_relaxed);
                 m_gc_main_thread = thread(&GCMain::_gc_main_thread, this);
             }
             ~GCMain()
@@ -2419,18 +2407,13 @@ void* woomem_alloc_attrib(size_t size, int attrib)
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
 
     // In marking, mark new unit before freeing old.
-    if (t_tls_page_collection.m_is_marking &&
+    if (g_gc_in_marking != WOOMEM_BOOL_FALSE &&
         (old_unit_head->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK))
     {
         if (WOOMEM_GC_MARKED_FULL_MARKED !=
             old_unit_head->m_gc_marked.load(memory_order::memory_order_relaxed))
         {
-            if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
-            {
-                woomem_try_mark_unit(reinterpret_cast<intptr_t>(new_ptr));
-            }
-            else
-                t_tls_page_collection.m_is_marking = false;
+            woomem_try_mark_unit(reinterpret_cast<intptr_t>(new_ptr));
         }
     }
 
@@ -2451,49 +2434,14 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
         address_may_invalid);
 }
 
-void woomem_mark_unit(void* unit_address)
+void woomem_try_mark_unit_head(intptr_t address_may_invalid)
+{
+    if (address_may_invalid != 0 && (address_may_invalid & (BASE_ALIGNMENT - 1)))
+        woomem_try_mark_unit(address_may_invalid);
+}
+
+void woomem_mark_unit_head(void* unit_address)
 {
     gc::g_gc_main->m_global_gray_marking_list.try_mark_gray_and_add(
         ((UnitHead*)unit_address) - 1);
-}
-
-woomem_Bool woomem_checkpoint(void)
-{
-    t_tls_page_collection.m_is_marking =
-        gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_acquire);
-
-    if (t_tls_page_collection.m_is_marking)
-    {
-        // Sync GC timing.
-        t_tls_page_collection.m_alloc_timing = gc::g_gc_main->m_gc_timing;
-
-        return WOOMEM_BOOL_TRUE;
-    }
-    return WOOMEM_BOOL_FALSE;
-}
-
-void woomem_delete_barrier(void* addr)
-{
-    if (t_tls_page_collection.m_is_marking)
-    {
-        if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
-            woomem_try_mark_unit(reinterpret_cast<intptr_t>(addr));
-        else
-            t_tls_page_collection.m_is_marking = false;
-    }
-}
-
-void woomem_write_barrier_mixed(void** writing_target_unit, void* addr)
-{
-    if (t_tls_page_collection.m_is_marking)
-    {
-        if (gc::g_gc_main->m_gc_in_marking.load(memory_order::memory_order_relaxed))
-        {
-            woomem_try_mark_unit(reinterpret_cast<intptr_t>(*writing_target_unit));
-            woomem_try_mark_unit(reinterpret_cast<intptr_t>(addr));
-        }
-        else
-            t_tls_page_collection.m_is_marking = false;
-    }
-    *writing_target_unit = addr;
 }
