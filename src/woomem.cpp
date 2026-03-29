@@ -2328,10 +2328,10 @@ void woomem_init(
 
 void woomem_shutdown(void)
 {
-    g_global_page_collection.reset();
-
     // GC stop.
     gc::shutdown();
+
+    g_global_page_collection.reset();
 }
 
 /* OPTIONAL */ void* woomem_alloc_normal(size_t size)
