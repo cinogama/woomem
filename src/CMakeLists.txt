@@ -7,7 +7,7 @@ file(GLOB_RECURSE woomem_src_c *.c)
 file(GLOB_RECURSE woomem_src_hpp *.hpp)
 file(GLOB_RECURSE woomem_src_h *.h)
 
-add_library(woomem 
+add_library(woomem STATIC
     ${woomem_src_cpp} 
     ${woomem_src_c}
     ${woomem_src_hpp}
