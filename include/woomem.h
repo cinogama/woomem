@@ -114,7 +114,7 @@ extern "C" {
     /*
     使用此方法标记明确的单元起始地址
     */
-    void woomem_mark_unit_head(void* unit_address);
+    void woomem_mark_unit_head(const void* unit_address);
 
 #ifdef __cplusplus
 }
