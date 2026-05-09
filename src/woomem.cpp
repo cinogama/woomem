@@ -1891,6 +1891,10 @@ namespace woomem_cppimpl
             mutex               m_gc_main_thread_trigger_mx;
             condition_variable  m_gc_main_thread_trigger_cv;
 
+            mutex               m_collect_mx;
+            condition_variable  m_collect_cv;
+            bool                m_collect_waiting;
+
             GlobalGrayList      m_global_gray_marking_list;
 
             /*
@@ -2195,31 +2199,44 @@ namespace woomem_cppimpl
             {
                 for (;;)
                 {
-                    unique_lock<mutex> ug(m_gc_main_thread_trigger_mx);
-                    for (size_t i = 0; i < 1000; ++i)
                     {
-                        m_gc_main_thread_trigger_cv.wait_for(
-                            ug,
-                            10ms,   // Force trigger GC per 10sec.
-                            [this]()
-                            {
-                                // TODO: 在此检查 GC 策略
-                                return m_gc_main_thread_trigger || m_gc_main_thread_stop;
-                            });
+                        unique_lock<mutex> ug(m_gc_main_thread_trigger_mx);
+                        for (size_t i = 0; i < 1000; ++i)
+                        {
+                            m_gc_main_thread_trigger_cv.wait_for(
+                                ug,
+                                10ms,   // Force trigger GC per 10sec.
+                                [this]()
+                                {
+                                    // TODO: 在此检查 GC 策略
+                                    return m_gc_main_thread_trigger || m_gc_main_thread_stop;
+                                });
 
-                        if (m_gc_main_thread_stop)
-                            return;
+                            if (m_gc_main_thread_stop)
+                                return;
+                        }
+                        m_gc_main_thread_trigger = false;
                     }
-                    ug.unlock();
 
                     // GC Job here.
                     _gc_main_job();
+
+                    // Notify any thread waiting in collect_now_and_wait().
+                    {
+                        lock_guard<mutex> lg(m_collect_mx);
+                        if (m_collect_waiting)
+                        {
+                            m_collect_waiting = false;
+                            m_collect_cv.notify_all();
+                        }
+                    }
                 }
             }
 
             GCMain()
                 : m_gc_main_thread_stop(false)
                 , m_gc_main_thread_trigger(false)
+                , m_collect_waiting(false)
             {
                 m_gc_main_thread = thread(&GCMain::_gc_main_thread, this);
             }
@@ -2237,6 +2254,16 @@ namespace woomem_cppimpl
                 m_gc_main_thread_trigger = true;
 
                 m_gc_main_thread_trigger_cv.notify_one();
+            }
+
+            void collect_now_and_wait()
+            {
+                unique_lock<mutex> lg(m_collect_mx);
+                m_collect_waiting = true;
+
+                trigger();
+
+                m_collect_cv.wait(lg, [this]() { return !m_collect_waiting; });
             }
 
             void sending_to_mark_gray(intptr_t may_addr) noexcept
@@ -2332,6 +2359,12 @@ void woomem_shutdown(void)
     gc::shutdown();
 
     g_global_page_collection.reset();
+}
+
+void woomem_gc_collect(void)
+{
+    assert(gc::g_gc_main != nullptr);
+    gc::g_gc_main->collect_now_and_wait();
 }
 
 /* OPTIONAL */ void* woomem_alloc_normal(size_t size)

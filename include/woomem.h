@@ -18,6 +18,7 @@ extern "C" {
         /* OPTIONAL */ woomem_RootMarkingFunc start_marking,
         /* OPTIONAL */ woomem_RootMarkingFunc stop_marking);
     void woomem_shutdown(void);
+    void woomem_gc_collect(void);
 
     /*
     woomem_GCUnitType
