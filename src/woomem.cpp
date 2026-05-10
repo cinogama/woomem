@@ -494,6 +494,8 @@ namespace woomem_cppimpl
         {
             Page* m_next_page;
             LargePageUnitHead* m_next_large_unit;
+
+            uint64_t _gap_for_32bits_platform_;
         };
 
         // Used for finding chunk head.
@@ -517,7 +519,11 @@ namespace woomem_cppimpl
     struct UnitHead
     {
         /* Used for user free. */
-        Page* m_parent_page;
+        union
+        {
+            Page* m_parent_page;
+            uint64_t _gap_for_32bits_platform_;
+        };
 
         uint8_t         m_alloc_timing;
         uint8_t /* woomem_GCUnitTypeMask */ m_gc_type;
@@ -2130,7 +2136,7 @@ namespace woomem_cppimpl
                                         current_page->m_page_head.m_page_belong_to_group];
 
                                 const size_t total_units_in_page = (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
-                                if (free_unit_count * 2 >= total_units_in_page)
+                                if (((size_t)free_unit_count << 1) >= total_units_in_page)
                                 {
                                     current_page->m_page_head.m_abondon_page_flag.store(
                                         false, memory_order::memory_order_relaxed);
