@@ -480,7 +480,7 @@ namespace woomem_cppimpl
         if (size <= MOST_LARGE_UNIT_SIZE)
         {
             return static_cast<PageGroupType>(
-                LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) >> 5 /* div PAGE_SIZE */));
+                LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) / PAGE_SIZE));
         }
         return HUGE_UNIT;
     }
@@ -2388,7 +2388,11 @@ void* woomem_alloc_attrib(size_t size, int attrib)
 
     UnitHead* const old_unit_head = reinterpret_cast<UnitHead*>(ptr) - 1;
     Page* const old_page = old_unit_head->m_parent_page;
-    const PageGroupType old_group_type = old_page->m_page_head.m_page_belong_to_group;
+
+    const PageGroupType old_group_type = 
+        old_page != nullptr 
+        ? old_page->m_page_head.m_page_belong_to_group
+        :(reinterpret_cast<LargePageUnitHead*>(ptr) - 1)->m_page_head.m_page_belong_to_group;
 
     // 获取新大小对应的分配组
     const PageGroupType new_group_type = get_page_group_type_for_size(new_size);
