@@ -114,9 +114,9 @@ extern "C" {
     void woomem_try_mark_unit_head(intptr_t address_may_invalid);
 
     /*
-    使用此方法标记明确的单元起始地址
+    使用此方法标记明确的单元起始地址(或者空地址）
     */
-    void woomem_mark_unit_head(const void* unit_address);
+    void woomem_mark_unit_head(const void* unit_address_may_null);
 
 #ifdef __cplusplus
 }

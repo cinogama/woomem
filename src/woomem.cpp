@@ -2494,8 +2494,9 @@ void woomem_try_mark_unit_head(intptr_t address_may_invalid)
         woomem_try_mark_unit(address_may_invalid);
 }
 
-void woomem_mark_unit_head(const void* unit_address)
+void woomem_mark_unit_head(const void* unit_address_may_null)
 {
-    gc::g_gc_main->m_global_gray_marking_list.try_mark_gray_and_add(
-        ((UnitHead*)unit_address) - 1);
+    if (unit_address_may_null != nullptr)
+        gc::g_gc_main->m_global_gray_marking_list.try_mark_gray_and_add(
+            ((UnitHead*)unit_address_may_null) - 1);
 }
