@@ -78,6 +78,7 @@ extern "C" {
     } woomem_Bool;
 
     extern woomem_Bool g_gc_in_marking;
+    extern size_t g_alive_unit_size_after_gc_scan;
 
     typedef void (*woomem_DestroyFunc)(void*, void*);
 

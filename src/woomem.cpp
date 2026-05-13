@@ -20,6 +20,7 @@
 #include <chrono>
 
 woomem_Bool g_gc_in_marking;
+size_t g_alive_unit_size_after_gc_scan;
 uint8_t g_gc_timing;
 
 using namespace std;
@@ -567,14 +568,15 @@ namespace woomem_cppimpl
             m_gc_marked.store(
                 WOOMEM_GC_MARKED_RELEASED, memory_order::memory_order_relaxed);
         }
-        WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status() noexcept
+        WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status(
+            size_t unit_align_sz, size_t* inout_counter) noexcept
         {
             if (0 == (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
                 || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == g_gc_timing))
                 // Unit not need to sweep, or it allocated during this gc round, skip this unit.
                 return false;
 
-            const uint8_t marked_status = 
+            const uint8_t marked_status =
                 m_gc_marked.load(memory_order::memory_order_relaxed);
 
             // NOTE: Unit here cannot be marked uncomplete.
@@ -587,7 +589,11 @@ namespace woomem_cppimpl
             if (marked_status != WOOMEM_GC_MARKED_RELEASED)
             {
                 // Reset marking state.
-                m_gc_marked.store(WOOMEM_GC_MARKED_UNMARKED, memory_order::memory_order_relaxed);
+                m_gc_marked.store(
+                    WOOMEM_GC_MARKED_UNMARKED,
+                    memory_order::memory_order_relaxed);
+
+                *inout_counter += unit_align_sz;
             }
             return false;
         }
@@ -2075,6 +2081,7 @@ namespace woomem_cppimpl
                 Chunk* current_chunk =
                     g_global_page_collection.m_current_chunk.load(memory_order::memory_order_relaxed);
 
+                size_t alive_size = 0;
                 while (current_chunk != nullptr)
                 {
                     const size_t committed_page_count =
@@ -2085,13 +2092,14 @@ namespace woomem_cppimpl
                         Page* const current_page = &current_chunk->m_reserved_address_begin[pid];
 
                         assert(current_page->m_page_head.m_page_belong_to_group != HUGE_UNIT);
+                        const size_t page_unit_size =
+                            UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
+                                current_page->m_page_head.m_page_belong_to_group];
+
                         if (current_page->m_page_head.m_page_belong_to_group < LARGE_PAGES_1)
                         {
                             // Is normal page.
-                            const size_t page_unit_size_with_unit_head =
-                                sizeof(UnitHead) + UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
-                                    current_page->m_page_head.m_page_belong_to_group];
-
+                            const size_t page_unit_size_with_unit_head = sizeof(UnitHead) + page_unit_size;
                             for (
                                 size_t boffset = sizeof(PageHead);
                                 boffset < sizeof(Page);
@@ -2102,7 +2110,9 @@ namespace woomem_cppimpl
 
                                 assert(this_unit_head->m_parent_page == current_page);
 
-                                if (this_unit_head->check_is_not_marked_during_this_round_gc_and_reset_mark_status())
+                                if (this_unit_head
+                                    ->check_is_not_marked_during_this_round_gc_and_reset_mark_status(
+                                        page_unit_size, &alive_size))
                                 {
                                     // Unit that need to be sweep didn't marked, and not allocated 
                                     // during this round GC scan.
@@ -2157,7 +2167,8 @@ namespace woomem_cppimpl
                             assert(this_large_unit_head->m_unit_head.m_parent_page == nullptr);
 
                             if (this_large_unit_head->m_unit_head
-                                .check_is_not_marked_during_this_round_gc_and_reset_mark_status())
+                                .check_is_not_marked_during_this_round_gc_and_reset_mark_status(
+                                    page_unit_size, &alive_size))
                             {
                                 if (this_large_unit_head->m_unit_head.try_free_this_unit_head())
                                 {
@@ -2185,7 +2196,8 @@ namespace woomem_cppimpl
                     HugeUnitHead* const next_huge_unit = current_huge_unit->m_next_huge_unit;
 
                     if (current_huge_unit->m_large_page_unit_head.m_unit_head
-                        .check_is_not_marked_during_this_round_gc_and_reset_mark_status()
+                        .check_is_not_marked_during_this_round_gc_and_reset_mark_status(
+                            current_huge_unit->m_aligned_unit_size, &alive_size)
                         || current_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked
                         .load(memory_order_relaxed) == WOOMEM_GC_MARKED_RELEASED)
                     {
@@ -2193,36 +2205,35 @@ namespace woomem_cppimpl
                         free(current_huge_unit);
                     }
                     else
-                    {
                         // Dropback
                         g_global_page_collection.commit_huge_unit_into_list_step2(current_huge_unit);
-                    }
 
                     current_huge_unit = next_huge_unit;
                 }
+
+                g_alive_unit_size_after_gc_scan = alive_size;
             }
             void _gc_main_thread() noexcept
             {
                 for (;;)
                 {
+                    do
                     {
                         unique_lock<mutex> ug(m_gc_main_thread_trigger_mx);
-                        for (size_t i = 0; i < 1000; ++i)
-                        {
-                            m_gc_main_thread_trigger_cv.wait_for(
-                                ug,
-                                10ms,   // Force trigger GC per 10sec.
-                                [this]()
-                                {
-                                    // TODO: 在此检查 GC 策略
-                                    return m_gc_main_thread_trigger || m_gc_main_thread_stop;
-                                });
+                        m_gc_main_thread_trigger_cv.wait_for(
+                            ug,
+                            10s,   // Force trigger GC per 10sec.
+                            [this]()
+                            {
+                                // TODO: 在此检查 GC 策略
+                                return m_gc_main_thread_trigger || m_gc_main_thread_stop;
+                            });
 
-                            if (m_gc_main_thread_stop)
-                                return;
-                        }
+                        if (m_gc_main_thread_stop)
+                            return;
+
                         m_gc_main_thread_trigger = false;
-                    }
+                    } while (0);
 
                     // GC Job here.
                     _gc_main_job();
@@ -2389,10 +2400,10 @@ void* woomem_alloc_attrib(size_t size, int attrib)
     UnitHead* const old_unit_head = reinterpret_cast<UnitHead*>(ptr) - 1;
     Page* const old_page = old_unit_head->m_parent_page;
 
-    const PageGroupType old_group_type = 
-        old_page != nullptr 
+    const PageGroupType old_group_type =
+        old_page != nullptr
         ? old_page->m_page_head.m_page_belong_to_group
-        :(reinterpret_cast<LargePageUnitHead*>(ptr) - 1)->m_page_head.m_page_belong_to_group;
+        : (reinterpret_cast<LargePageUnitHead*>(ptr) - 1)->m_page_head.m_page_belong_to_group;
 
     // 获取新大小对应的分配组
     const PageGroupType new_group_type = get_page_group_type_for_size(new_size);
