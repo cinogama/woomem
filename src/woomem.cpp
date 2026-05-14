@@ -1199,11 +1199,12 @@ namespace woomem_cppimpl
                     if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                     {
                         current_chunk = Chunk::create_new_chunk();
-                        m_addr_to_chunk_table.add_new_chunk(current_chunk);
 
                         if (WOOMEM_UNLIKELY(current_chunk == nullptr))
                             // Failed to alloc chunk..
                             return nullptr;
+
+                        m_addr_to_chunk_table.add_new_chunk(current_chunk);
 
                         while (!m_current_chunk.compare_exchange_weak(
                             current_chunk->m_last_chunk,
@@ -1501,9 +1502,11 @@ namespace woomem_cppimpl
             }
             void drop_list(GrayUnit* drop_unit_list) noexcept
             {
+                size_t i = 0;
                 GrayUnit* last_of_dropping_list = drop_unit_list;
                 do
                 {
+                    ++i;
                     if (last_of_dropping_list->m_last == nullptr)
                         break;
 
@@ -1521,6 +1524,7 @@ namespace woomem_cppimpl
                     memory_order::memory_order_relaxed))
                 {
                     /* retry. */
+                    WOOMEM_PAUSE();
                 }
             }
             GrayUnit* pick_all_units() noexcept
@@ -2169,13 +2173,15 @@ namespace woomem_cppimpl
                                     current_free_offset = free_unit->m_next_alloc_unit_offset;
                                 }
 
-                                // 如果空闲单元数量超过页面总单元数的一半，则将该页面放回全局空闲页面池
+                                // 如果空闲单元数量超过页面总单元数的1/4，则将该页面放回全局空闲页面池
                                 const size_t page_unit_size_with_head =
                                     UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
                                         current_page->m_page_head.m_page_belong_to_group];
 
-                                const size_t total_units_in_page = (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
-                                if (((size_t)free_unit_count << 1) >= total_units_in_page)
+                                const size_t total_units_in_page = 
+                                    (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
+
+                                if (free_unit_count >= (total_units_in_page >> 2))
                                 {
                                     current_page->m_page_head.m_abondon_page_flag.store(
                                         false, memory_order::memory_order_relaxed);
@@ -2392,11 +2398,7 @@ void woomem_init(
         abort();
     }
 
-    if (max_chunk_memory != 0)
-        g_max_chunk_count = (max_chunk_memory + CHUNK_SIZE - 1) / CHUNK_SIZE;
-    else
-        g_max_chunk_count = 0;
-
+    g_max_chunk_count = (max_chunk_memory + CHUNK_SIZE - 1) / CHUNK_SIZE;
     g_max_huge_unit_memory = max_huge_unit_memory;
 
     gc::g_global_gc_methods.m_user_ctx = user_ctx;
