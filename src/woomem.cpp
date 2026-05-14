@@ -1502,11 +1502,9 @@ namespace woomem_cppimpl
             }
             void drop_list(GrayUnit* drop_unit_list) noexcept
             {
-                size_t i = 0;
                 GrayUnit* last_of_dropping_list = drop_unit_list;
                 do
                 {
-                    ++i;
                     if (last_of_dropping_list->m_last == nullptr)
                         break;
 
