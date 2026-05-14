@@ -16,7 +16,9 @@ extern "C" {
         /* OPTIONAL */ woomem_MarkCallbackFunc marker,
         /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer,
         /* OPTIONAL */ woomem_RootMarkingFunc start_marking,
-        /* OPTIONAL */ woomem_RootMarkingFunc stop_marking);
+        /* OPTIONAL */ woomem_RootMarkingFunc stop_marking,
+        size_t max_chunk_memory,
+        size_t max_huge_unit_memory);
     void woomem_shutdown(void);
     void woomem_gc_collect(void);
 

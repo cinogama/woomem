@@ -25,6 +25,11 @@ uint8_t g_gc_timing;
 
 using namespace std;
 
+static size_t g_max_chunk_count = 0;
+static size_t g_max_huge_unit_memory = 0;
+static atomic<size_t> g_chunk_count{0};
+static atomic<size_t> g_huge_unit_memory{0};
+
 #if defined(__GNUC__) || defined(__clang__)
 #   define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
 #   define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
@@ -949,6 +954,13 @@ namespace woomem_cppimpl
 
         static /* OPTIONAL */ Chunk* create_new_chunk()
         {
+            if (g_max_chunk_count != 0
+                && g_chunk_count.load(memory_order::memory_order_relaxed)
+                    >= g_max_chunk_count)
+            {
+                return nullptr;
+            }
+
             // Need to allocate a new chunk.
             void* chunk_storage = malloc(sizeof(Chunk));
             if (WOOMEM_UNLIKELY(chunk_storage == nullptr))
@@ -964,6 +976,8 @@ namespace woomem_cppimpl
                 reserved_address != nullptr
                 && 0 == woomem_os_commit_memory(reserved_address, CARDTABLE_LENGTH_IN_BYTE_PER_CHUNK)))
             {
+                g_chunk_count.fetch_add(
+                    1, memory_order::memory_order_relaxed);
                 return new (chunk_storage) Chunk(reserved_address);
             }
 
@@ -1309,20 +1323,31 @@ namespace woomem_cppimpl
             const size_t aligned_alloc_unit_size =
                 (unit_size + (CARDTABLE_SIZE_PER_BIT * 8 - 1)) & ~(CARDTABLE_SIZE_PER_BIT * 8 - 1);
 
+            const size_t total_huge_unit_size =
+                sizeof(HugeUnitHead) + aligned_alloc_unit_size
+                + (aligned_alloc_unit_size / CARDTABLE_SIZE_PER_BIT / 8);
+
+            if (g_max_huge_unit_memory != 0)
+            {
+                const size_t current_huge_memory =
+                    g_huge_unit_memory.load(memory_order::memory_order_relaxed);
+                if (current_huge_memory + total_huge_unit_size > g_max_huge_unit_memory)
+                {
+                    return nullptr;
+                }
+            }
+
             HugeUnitHead* const new_allocated_huge_unit =
                 reinterpret_cast<HugeUnitHead*>(
-                    malloc(
-                        // HugeUnitHead
-                        sizeof(HugeUnitHead)
-                        // UnitBody
-                        + aligned_alloc_unit_size
-                        // CardTable
-                        + (aligned_alloc_unit_size / CARDTABLE_SIZE_PER_BIT / 8)));
+                    malloc(total_huge_unit_size));
 
             if (WOOMEM_LIKELY(new_allocated_huge_unit != NULL))
             {
                 new_allocated_huge_unit->init_huge_unit_head_by_size(aligned_alloc_unit_size);
                 new_allocated_huge_unit->m_fact_unit_size = unit_size;
+
+                g_huge_unit_memory.fetch_add(
+                    total_huge_unit_size, memory_order::memory_order_relaxed);
 
                 return new_allocated_huge_unit;
             }
@@ -1855,6 +1880,8 @@ namespace woomem_cppimpl
             free(current_unit);
         }
 
+        g_huge_unit_memory.store(0, memory_order::memory_order_relaxed);
+
         for (auto& free_page_group_page : m_free_group_page_list)
             free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
 
@@ -1880,6 +1907,8 @@ namespace woomem_cppimpl
         m_current_chunk.store(
             nullptr,
             memory_order::memory_order_release);
+
+        g_chunk_count.store(0, memory_order::memory_order_relaxed);
 
         // Reset all threads.
         lock_guard<RWSpin> g(m_threads_mx);
@@ -2202,6 +2231,13 @@ namespace woomem_cppimpl
                         .load(memory_order_relaxed) == WOOMEM_GC_MARKED_RELEASED)
                     {
                         g_global_page_collection.m_addr_to_chunk_table.remove_huge_unit(current_huge_unit);
+
+                        const size_t total_huge_unit_size =
+                            sizeof(HugeUnitHead) + current_huge_unit->m_aligned_unit_size
+                            + (current_huge_unit->m_aligned_unit_size / CARDTABLE_SIZE_PER_BIT / 8);
+                        g_huge_unit_memory.fetch_sub(
+                            total_huge_unit_size, memory_order::memory_order_relaxed);
+
                         free(current_huge_unit);
                     }
                     else
@@ -2335,7 +2371,9 @@ void woomem_init(
     /* OPTIONAL */ woomem_MarkCallbackFunc marker,
     /* OPTIONAL */ woomem_DestroyCallbackFunc destroyer,
     /* OPTIONAL */ woomem_RootMarkingFunc start_marking,
-    /* OPTIONAL */ woomem_RootMarkingFunc stop_marking)
+    /* OPTIONAL */ woomem_RootMarkingFunc stop_marking,
+    size_t max_chunk_memory,
+    size_t max_huge_unit_memory)
 {
     assert(g_global_page_collection.m_current_chunk.load(
         memory_order::memory_order_acquire) == nullptr);
@@ -2353,6 +2391,13 @@ void woomem_init(
             "WOOMEM: Card table size error. Alignment with the system page size is required.");
         abort();
     }
+
+    if (max_chunk_memory != 0)
+        g_max_chunk_count = (max_chunk_memory + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    else
+        g_max_chunk_count = 0;
+
+    g_max_huge_unit_memory = max_huge_unit_memory;
 
     gc::g_global_gc_methods.m_user_ctx = user_ctx;
     gc::g_global_gc_methods.m_marker = marker;
