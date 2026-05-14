@@ -2070,11 +2070,11 @@ namespace woomem_cppimpl
                 // 6. 全部标记完成，调用终止检查点回调
                 g_gc_in_marking = WOOMEM_BOOL_FALSE;
 
-                if (g_global_gc_methods.m_stop_marking != NULL)
-                    g_global_gc_methods.m_stop_marking(g_global_gc_methods.m_user_ctx);
-
                 // 7. 最终标记，收尾
                 _mark_to_dark_job();
+
+                if (g_global_gc_methods.m_stop_marking != NULL)
+                    g_global_gc_methods.m_stop_marking(g_global_gc_methods.m_user_ctx);
 
                 // 8. 开始回收
                 // Walkthrough all chunks and huge units.
