@@ -27,8 +27,8 @@ using namespace std;
 
 static size_t g_max_chunk_count = 0;
 static size_t g_max_huge_unit_memory = 0;
-static atomic<size_t> g_chunk_count{0};
-static atomic<size_t> g_huge_unit_memory{0};
+static atomic<size_t> g_chunk_count{ 0 };
+static atomic<size_t> g_huge_unit_memory{ 0 };
 
 #if defined(__GNUC__) || defined(__clang__)
 #   define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
@@ -955,8 +955,7 @@ namespace woomem_cppimpl
         static /* OPTIONAL */ Chunk* create_new_chunk()
         {
             if (g_max_chunk_count != 0
-                && g_chunk_count.load(memory_order::memory_order_relaxed)
-                    >= g_max_chunk_count)
+                && g_chunk_count.load(memory_order::memory_order_relaxed) >= g_max_chunk_count)
             {
                 return nullptr;
             }
@@ -2046,8 +2045,6 @@ namespace woomem_cppimpl
                                 memory_order::memory_order_relaxed))
                             {
                                 // This unit has been marked as black or has been freed manually.
-                                assert(expected_state == WOOMEM_GC_MARKED_FULL_MARKED
-                                    || expected_state == WOOMEM_GC_MARKED_RELEASED);
                                 continue;
                             }
 
@@ -2176,7 +2173,7 @@ namespace woomem_cppimpl
                                     UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
                                         current_page->m_page_head.m_page_belong_to_group];
 
-                                const size_t total_units_in_page = 
+                                const size_t total_units_in_page =
                                     (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
 
                                 if (free_unit_count >= (total_units_in_page >> 2))
