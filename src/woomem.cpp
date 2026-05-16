@@ -1115,8 +1115,8 @@ namespace woomem_cppimpl
                 }
                 else
                 {
-                    assert(may_valid_addr > unit_belong_page
-                        && unit_belong_page < unit_belong_page + 1);
+                    assert(may_valid_addr > &unit_belong_page->m_page_head + 1
+                        && may_valid_addr < unit_belong_page + 1);
 
                     const size_t unit_size_with_unit_head =
                         sizeof(UnitHead) +
