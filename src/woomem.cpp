@@ -30,6 +30,10 @@ static size_t g_max_huge_unit_memory = 0;
 static atomic<size_t> g_chunk_count{ 0 };
 static atomic<size_t> g_huge_unit_memory{ 0 };
 
+static atomic<size_t> g_allocated_since_last_gc{ 0 };
+static constexpr size_t WOOMEM_GC_TRIGGER_ALLOC_FACTOR = 2;
+static constexpr size_t WOOMEM_GC_TRIGGER_ALLOC_MIN = 4 * 1024 * 1024;
+
 #if defined(__GNUC__) || defined(__clang__)
 #   define WOOMEM_LIKELY(x)       __builtin_expect(!!(x), 1)
 #   define WOOMEM_UNLIKELY(x)     __builtin_expect(!!(x), 0)
@@ -1150,6 +1154,26 @@ namespace woomem_cppimpl
         }
     };
 
+    namespace gc
+    {
+        struct GCMain;
+        extern /* OPTIONAL */ GCMain* g_gc_main;
+        void _notify_alloc_trigger() noexcept;
+    }
+
+    WOOMEM_FORCE_INLINE void _woomem_try_trigger_gc_by_alloc(size_t newly_allocated) noexcept
+    {
+        size_t prev = g_allocated_since_last_gc.fetch_add(newly_allocated, std::memory_order_relaxed);
+        size_t total = prev + newly_allocated;
+
+        size_t threshold = g_alive_unit_size_after_gc_scan * WOOMEM_GC_TRIGGER_ALLOC_FACTOR;
+        if (threshold < WOOMEM_GC_TRIGGER_ALLOC_MIN)
+            threshold = WOOMEM_GC_TRIGGER_ALLOC_MIN;
+
+        if (total >= threshold)
+            gc::_notify_alloc_trigger();
+    }
+
     struct ThreadLocalPageCollection;
 
     struct GlobalPageCollection
@@ -1600,6 +1624,8 @@ namespace woomem_cppimpl
                     // 初始化单元属性
                     init_allocated_unit(allocated_unit, unit_type_mask);
 
+                    _woomem_try_trigger_gc_by_alloc(unit_size);
+
                     return allocated_unit + 1;
                 }
 
@@ -1628,6 +1654,9 @@ namespace woomem_cppimpl
                         *reinterpret_cast<UnitHead**>(allocated_unit + 1);
                     --current_alloc_group.m_free_unit_count;
                     init_allocated_unit(allocated_unit, unit_type_mask);
+
+                    _woomem_try_trigger_gc_by_alloc(unit_size);
+
                     return allocated_unit + 1;
                 }
                 return alloc_slow_path(alloc_group, unit_type_mask);
@@ -1650,6 +1679,9 @@ namespace woomem_cppimpl
                             memory_order::memory_order_relaxed));
 
                     init_allocated_unit(allocated_unit_head, unit_type_mask);
+
+                    _woomem_try_trigger_gc_by_alloc(
+                        UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[alloc_group]);
                 }
                 return allocated_unit;
             }
@@ -1665,6 +1697,8 @@ namespace woomem_cppimpl
 
                     init_allocated_unit(
                         &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
+
+                    _woomem_try_trigger_gc_by_alloc(unit_size);
 
                     g_global_page_collection.commit_huge_unit_into_list_step2(allocated_huge_unit);
                     g_global_page_collection.m_addr_to_chunk_table.add_huge_unit(allocated_huge_unit);
@@ -1740,6 +1774,9 @@ namespace woomem_cppimpl
 
             // 初始化分配的单元（复用内联函数）
             init_allocated_unit(allocated_unit, unit_type_mask);
+
+            _woomem_try_trigger_gc_by_alloc(
+                UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[alloc_group]);
 
             return allocated_unit + 1;
         }
@@ -2249,6 +2286,7 @@ namespace woomem_cppimpl
                 }
 
                 g_alive_unit_size_after_gc_scan = alive_size;
+                g_allocated_since_last_gc.store(0, std::memory_order_relaxed);
             }
             void _gc_main_thread() noexcept
             {
@@ -2262,8 +2300,14 @@ namespace woomem_cppimpl
                             10s,   // Force trigger GC per 10sec.
                             [this]()
                             {
-                                // TODO: 在此检查 GC 策略
-                                return m_gc_main_thread_trigger || m_gc_main_thread_stop;
+                                if (m_gc_main_thread_trigger || m_gc_main_thread_stop)
+                                    return true;
+
+                                size_t allocated = g_allocated_since_last_gc.load(std::memory_order_relaxed);
+                                size_t threshold = g_alive_unit_size_after_gc_scan * WOOMEM_GC_TRIGGER_ALLOC_FACTOR;
+                                if (threshold < WOOMEM_GC_TRIGGER_ALLOC_MIN)
+                                    threshold = WOOMEM_GC_TRIGGER_ALLOC_MIN;
+                                return allocated >= threshold;
                             });
 
                         if (m_gc_main_thread_stop)
@@ -2349,6 +2393,12 @@ namespace woomem_cppimpl
             //}
         };
         GCMain* g_gc_main = nullptr;
+
+        void _notify_alloc_trigger() noexcept
+        {
+            if (g_gc_main != nullptr)
+                g_gc_main->m_gc_main_thread_trigger_cv.notify_one();
+        }
 
         void init()
         {
