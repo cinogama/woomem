@@ -2456,28 +2456,37 @@ void woomem_gc_collect(void)
 {
     UnitHead* const uh = t_tls_page_collection.alloc(size);
 
-    // 初始化单元属性
-    t_tls_page_collection.init_allocated_unit(uh, 0);
-    _woomem_try_trigger_gc_by_alloc(size);
-
-    return uh + 1;
+    if (uh != nullptr)
+    {
+        t_tls_page_collection.init_allocated_unit(uh, 0);
+        _woomem_try_trigger_gc_by_alloc(size);
+        return uh + 1;
+    }
+    return nullptr;
 }
 void* woomem_alloc_attrib(size_t size, int attrib)
 {
     UnitHead* const uh = t_tls_page_collection.alloc(size);
 
-    t_tls_page_collection.init_allocated_unit(uh, (uint8_t)attrib);
-    _woomem_try_trigger_gc_by_alloc(size);
-
-    return uh + 1;
+    if (uh != nullptr)
+    {
+        t_tls_page_collection.init_allocated_unit(uh, (uint8_t)attrib);
+        _woomem_try_trigger_gc_by_alloc(size);
+        return uh + 1;
+    }
+    return nullptr;
 }
 
 /* OPTIONAL */ void* woomem_alloc_delay_init(size_t size)
 {
     UnitHead* const uh = t_tls_page_collection.alloc(size);
 
-    _woomem_try_trigger_gc_by_alloc(size);
-    return uh + 1;
+    if (uh != nullptr)
+    {
+        _woomem_try_trigger_gc_by_alloc(size);
+        return uh + 1;
+    }
+    return nullptr;
 }
 void woomem_init_delay_alloc_attrib(void* p, int attrib)
 {
@@ -2554,13 +2563,12 @@ void woomem_init_delay_alloc_attrib(void* p, int attrib)
     memcpy(new_ptr, ptr, (old_unit_size < new_size) ? old_unit_size : new_size);
 
     // In marking, mark new unit before freeing old.
-    if (g_gc_in_marking != WOOMEM_BOOL_FALSE &&
-        (old_unit_head->m_gc_type & WOOMEM_GC_UNIT_TYPE_AUTO_MARK))
+    if (g_gc_in_marking != WOOMEM_BOOL_FALSE)
     {
         if (WOOMEM_GC_MARKED_FULL_MARKED !=
             old_unit_head->m_gc_marked.load(memory_order::memory_order_relaxed))
         {
-            woomem_try_mark_unit(reinterpret_cast<intptr_t>(new_ptr));
+            woomem_mark_unit_head(new_ptr);
         }
     }
 
