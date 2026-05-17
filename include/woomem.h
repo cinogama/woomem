@@ -89,6 +89,8 @@ extern "C" {
     */
     /* OPTIONAL */ void* woomem_alloc_normal(size_t size);
     /* OPTIONAL */ void* woomem_alloc_attrib(size_t size, int attrib);
+    /* OPTIONAL */ void* woomem_alloc_delay_init(size_t size);
+    void woomem_init_delay_alloc_attrib(void* p, int attrib);
 
     /*
     重新分配给定的内存单元为新的大小，并返回新的指针。

@@ -1599,6 +1599,19 @@ namespace woomem_cppimpl
             allocated_unit->m_gc_marked.store(
                 WOOMEM_GC_MARKED_UNMARKED,
                 memory_order::memory_order_release);
+
+            if (allocated_unit->m_parent_page == nullptr)
+            {
+                LargePageUnitHead* const large =
+                    reinterpret_cast<LargePageUnitHead*>(allocated_unit + 1) - 1;
+                if (large->m_page_head.m_page_belong_to_group == PageGroupType::HUGE_UNIT)
+                {
+                    HugeUnitHead* const huge =
+                        reinterpret_cast<HugeUnitHead*>(
+                            reinterpret_cast<char*>(large) - offsetof(HugeUnitHead, m_large_page_unit_head));
+                    g_global_page_collection.commit_huge_unit_into_list_step2(huge);
+                }
+            }
         }
 
         // 优化：将分配逻辑拆分，减少热路径的代码大小
@@ -2457,6 +2470,20 @@ void* woomem_alloc_attrib(size_t size, int attrib)
     _woomem_try_trigger_gc_by_alloc(size);
 
     return uh + 1;
+}
+
+/* OPTIONAL */ void* woomem_alloc_delay_init(size_t size)
+{
+    UnitHead* const uh = t_tls_page_collection.alloc(size);
+
+    _woomem_try_trigger_gc_by_alloc(size);
+    return uh + 1;
+}
+void woomem_init_delay_alloc_attrib(void* p, int attrib)
+{
+    UnitHead* const uh = reinterpret_cast<UnitHead*>(p) - 1;
+
+    t_tls_page_collection.init_allocated_unit(uh, (uint8_t)attrib);
 }
 
 /* OPTIONAL */ void* woomem_realloc(void* ptr, size_t new_size)
