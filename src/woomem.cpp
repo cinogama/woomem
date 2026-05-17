@@ -1310,7 +1310,7 @@ namespace woomem_cppimpl
                 WOOMEM_PAUSE();
             }
         }
-        /* OPTIONAL */ void* try_alloc_large_unit(PageGroupType group_type) noexcept
+        /* OPTIONAL */ UnitHead* try_alloc_large_unit(PageGroupType group_type) noexcept
         {
             auto& large_unit_list = m_free_large_unit_list[group_type];
             LargePageUnitHead* free_large_unit =
@@ -1325,7 +1325,7 @@ namespace woomem_cppimpl
                 {
                     // Successfully got the large unit
                     free_large_unit->m_page_head.m_next_large_unit = nullptr;
-                    return free_large_unit + 1;
+                    return &free_large_unit->m_unit_head;
                 }
                 // CAS failed, free_large_unit is updated to current value, retry
                 WOOMEM_PAUSE();
@@ -1337,7 +1337,7 @@ namespace woomem_cppimpl
                 LargePageUnitHead* large_unit_head =
                     reinterpret_cast<LargePageUnitHead*>(new_large_unit);
 
-                return large_unit_head + 1;
+                return &large_unit_head->m_unit_head;
             }
             return nullptr;
         }
@@ -1594,13 +1594,15 @@ namespace woomem_cppimpl
             //      无法正确读取到分配的元数据；这可能导致 GC 错误判断单元的分配时机导致错误
             //      释放
             //
+            assert(WOOMEM_GC_MARKED_RELEASED == allocated_unit->m_gc_marked.load(
+                memory_order::memory_order_relaxed));
             allocated_unit->m_gc_marked.store(
                 WOOMEM_GC_MARKED_UNMARKED,
                 memory_order::memory_order_release);
         }
 
         // 优化：将分配逻辑拆分，减少热路径的代码大小
-        WOOMEM_FORCE_INLINE void* alloc(size_t unit_size, uint8_t /* 4bits */ unit_type_mask) noexcept
+        WOOMEM_FORCE_INLINE UnitHead* alloc(size_t unit_size) noexcept
         {
             // 优化：直接计算查找索引，减少一次比较
             const size_t lookup_index = (unit_size + 7) >> 3;
@@ -1621,24 +1623,19 @@ namespace woomem_cppimpl
                         *reinterpret_cast<UnitHead**>(allocated_unit + 1);
                     --current_alloc_group.m_free_unit_count;
 
-                    // 初始化单元属性
-                    init_allocated_unit(allocated_unit, unit_type_mask);
-
-                    _woomem_try_trigger_gc_by_alloc(unit_size);
-
-                    return allocated_unit + 1;
+                    return allocated_unit;
                 }
 
                 // 2. Slow Path
-                return alloc_slow_path(alloc_group, unit_type_mask);
+                return alloc_slow_path(alloc_group);
             }
 
             // 中等/大对象路径
-            return alloc_medium_or_large(unit_size, unit_type_mask);
+            return alloc_medium_or_large(unit_size);
         }
 
         // 中等和大对象的分配路径（冷路径）
-        WOOMEM_NOINLINE void* alloc_medium_or_large(size_t unit_size, uint8_t /* 4bits */ unit_type_mask) noexcept
+        WOOMEM_NOINLINE UnitHead* alloc_medium_or_large(size_t unit_size) noexcept
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
 
@@ -1653,37 +1650,17 @@ namespace woomem_cppimpl
                     current_alloc_group.m_free_unit_head =
                         *reinterpret_cast<UnitHead**>(allocated_unit + 1);
                     --current_alloc_group.m_free_unit_count;
-                    init_allocated_unit(allocated_unit, unit_type_mask);
 
-                    _woomem_try_trigger_gc_by_alloc(unit_size);
-
-                    return allocated_unit + 1;
+                    return allocated_unit;
                 }
-                return alloc_slow_path(alloc_group, unit_type_mask);
+                return alloc_slow_path(alloc_group);
             }
             else if (alloc_group != PageGroupType::HUGE_UNIT)
             {
                 assert(alloc_group < PageGroupType::HUGE_UNIT);
 
-                void* const allocated_unit =
+                return
                     g_global_page_collection.try_alloc_large_unit(alloc_group);
-
-                if (WOOMEM_LIKELY(allocated_unit != nullptr))
-                {
-                    UnitHead* const allocated_unit_head =
-                        reinterpret_cast<UnitHead*>(allocated_unit) - 1;
-
-                    assert(allocated_unit_head->m_parent_page == nullptr);
-                    assert(WOOMEM_GC_MARKED_RELEASED
-                        == allocated_unit_head->m_gc_marked.load(
-                            memory_order::memory_order_relaxed));
-
-                    init_allocated_unit(allocated_unit_head, unit_type_mask);
-
-                    _woomem_try_trigger_gc_by_alloc(
-                        UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[alloc_group]);
-                }
-                return allocated_unit;
             }
             else
             {
@@ -1695,22 +1672,15 @@ namespace woomem_cppimpl
                         == allocated_huge_unit->m_large_page_unit_head.m_unit_head.m_gc_marked.load(
                             memory_order::memory_order_relaxed));
 
-                    init_allocated_unit(
-                        &allocated_huge_unit->m_large_page_unit_head.m_unit_head, unit_type_mask);
-
-                    _woomem_try_trigger_gc_by_alloc(unit_size);
-
-                    g_global_page_collection.commit_huge_unit_into_list_step2(allocated_huge_unit);
                     g_global_page_collection.m_addr_to_chunk_table.add_huge_unit(allocated_huge_unit);
-
-                    return allocated_huge_unit + 1;
+                    return &allocated_huge_unit->m_large_page_unit_head.m_unit_head;
                 }
                 return nullptr;
             }
         }
 
         // 慢速路径：从页面分配
-        WOOMEM_NOINLINE void* alloc_slow_path(PageGroupType alloc_group, uint8_t /* 4bits */ unit_type_mask) noexcept
+        WOOMEM_NOINLINE UnitHead* alloc_slow_path(PageGroupType alloc_group) noexcept
         {
             auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
             if (WOOMEM_UNLIKELY(0 == current_alloc_group.m_allocating_page_count))
@@ -1771,14 +1741,7 @@ namespace woomem_cppimpl
                 // We have tried all method to get new unit, alloc failed...
                 return nullptr;
             }
-
-            // 初始化分配的单元（复用内联函数）
-            init_allocated_unit(allocated_unit, unit_type_mask);
-
-            _woomem_try_trigger_gc_by_alloc(
-                UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[alloc_group]);
-
-            return allocated_unit + 1;
+            return allocated_unit;
         }
 
         WOOMEM_FORCE_INLINE void free(void* unit) noexcept
@@ -1924,7 +1887,7 @@ namespace woomem_cppimpl
             free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
 
         for (auto& free_large_unit_list : m_free_large_unit_list)
-            m_free_large_unit_list->store(nullptr, memory_order::memory_order_relaxed);
+            free_large_unit_list.store(nullptr, memory_order::memory_order_relaxed);
 
         Chunk* current_chunk =
             m_current_chunk.load(memory_order::memory_order_acquire);
@@ -2478,11 +2441,22 @@ void woomem_gc_collect(void)
 
 /* OPTIONAL */ void* woomem_alloc_normal(size_t size)
 {
-    return t_tls_page_collection.alloc(size, 0);
+    UnitHead* const uh = t_tls_page_collection.alloc(size);
+
+    // 初始化单元属性
+    t_tls_page_collection.init_allocated_unit(uh, 0);
+    _woomem_try_trigger_gc_by_alloc(size);
+
+    return uh + 1;
 }
 void* woomem_alloc_attrib(size_t size, int attrib)
 {
-    return t_tls_page_collection.alloc(size, static_cast<uint8_t>(attrib));
+    UnitHead* const uh = t_tls_page_collection.alloc(size);
+
+    t_tls_page_collection.init_allocated_unit(uh, (uint8_t)attrib);
+    _woomem_try_trigger_gc_by_alloc(size);
+
+    return uh + 1;
 }
 
 /* OPTIONAL */ void* woomem_realloc(void* ptr, size_t new_size)
@@ -2582,7 +2556,7 @@ void woomem_try_mark_unit(intptr_t address_may_invalid)
 
 void woomem_try_mark_unit_head(intptr_t address_may_invalid)
 {
-    if (address_may_invalid != 0 && (address_may_invalid & (BASE_ALIGNMENT - 1)))
+    if (address_may_invalid != 0 && 0 == (address_may_invalid & (BASE_ALIGNMENT - 1)))
         woomem_try_mark_unit(address_may_invalid);
 }
 
