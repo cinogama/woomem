@@ -580,8 +580,14 @@ namespace woomem_cppimpl
         WOOMEM_FORCE_INLINE bool check_is_not_marked_during_this_round_gc_and_reset_mark_status(
             size_t unit_align_sz, size_t* inout_counter) noexcept
         {
-            if (0 == (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
-                || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == g_gc_timing))
+            const bool donot_need_sweep =
+                0 == (m_gc_type & WOOMEM_GC_UNIT_TYPE_NEED_SWEEP)
+                || (m_gc_age == NEW_BORN_GC_AGE && m_alloc_timing == g_gc_timing);
+
+            if (m_gc_age != 0)
+                --m_gc_age;
+
+            if (donot_need_sweep)
                 // Unit not need to sweep, or it allocated during this gc round, skip this unit.
                 return false;
 
