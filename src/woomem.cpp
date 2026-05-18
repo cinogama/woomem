@@ -209,7 +209,7 @@ namespace woomem_cppimpl
 
     constexpr uint8_t NEW_BORN_GC_AGE = 15;
 
-    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 8;
+    constexpr size_t THREAD_LOCAL_POOL_MAX_CACHED_PAGE_COUNT_PER_GROUP = 4;
 
     enum PageGroupType : uint8_t
     {
@@ -1693,7 +1693,10 @@ namespace woomem_cppimpl
                 }
 
                 // 2. Slow Path
-                return alloc_slow_path(alloc_group);
+                UnitHead* const unit = alloc_slow_path(alloc_group);
+                if (WOOMEM_LIKELY(unit != nullptr))
+                    return unit;
+                return alloc_fallback(alloc_group, unit_size);
             }
 
             // 中等/大对象路径
@@ -1719,7 +1722,10 @@ namespace woomem_cppimpl
 
                     return allocated_unit;
                 }
-                return alloc_slow_path(alloc_group);
+                UnitHead* const unit = alloc_slow_path(alloc_group);
+                if (WOOMEM_LIKELY(unit != nullptr))
+                    return unit;
+                return alloc_fallback(alloc_group, unit_size);
             }
             else if (alloc_group != PageGroupType::HUGE_UNIT)
             {
@@ -1808,6 +1814,50 @@ namespace woomem_cppimpl
                 return nullptr;
             }
             return allocated_unit;
+        }
+
+        /*
+        当 alloc_slow_path 对当前组分配失败时，尝试从下一个更大的组进行分配，
+        逐级递进直到 HUGE_UNIT 组。
+        */
+        WOOMEM_NOINLINE UnitHead* alloc_fallback(PageGroupType failed_group, size_t unit_size) noexcept
+        {
+            PageGroupType next = static_cast<PageGroupType>(
+                static_cast<uint8_t>(failed_group) + 1);
+
+            for (; next <= PageGroupType::HUGE_UNIT;
+                 next = static_cast<PageGroupType>(static_cast<uint8_t>(next) + 1))
+            {
+                if (next < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT)
+                {
+                    UnitHead* const unit = alloc_slow_path(next);
+                    if (unit != nullptr)
+                        return unit;
+                }
+                else if (next < PageGroupType::TOTAL_GROUP_COUNT)
+                {
+                    UnitHead* const unit =
+                        g_global_page_collection.try_alloc_large_unit(next);
+                    if (unit != nullptr)
+                        return unit;
+                }
+                else
+                {
+                    assert(next == PageGroupType::HUGE_UNIT);
+
+                    HugeUnitHead* const huge =
+                        g_global_page_collection.try_alloc_huge_unit_step1(unit_size);
+                    if (WOOMEM_LIKELY(huge != nullptr))
+                    {
+                        assert(huge->m_large_page_unit_head.m_unit_head.m_parent_page
+                            == nullptr);
+                        g_global_page_collection.m_addr_to_chunk_table.add_huge_unit(
+                            huge);
+                        return &huge->m_large_page_unit_head.m_unit_head;
+                    }
+                }
+            }
+            return nullptr;
         }
 
         WOOMEM_FORCE_INLINE void free(void* unit) noexcept
