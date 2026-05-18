@@ -587,23 +587,22 @@ namespace woomem_cppimpl
             if (m_gc_age != 0)
                 --m_gc_age;
 
-            if (donot_need_sweep)
-                // Unit not need to sweep, or it allocated during this gc round, skip this unit.
-                return false;
-
             const uint8_t marked_status =
                 m_gc_marked.load(memory_order::memory_order_relaxed);
 
             // NOTE: Unit here cannot be marked uncomplete.
             assert(marked_status != WOOMEM_GC_MARKED_SELF_MARKED);
 
-            if (marked_status == WOOMEM_GC_MARKED_UNMARKED)
+            if (marked_status == WOOMEM_GC_MARKED_UNMARKED && !donot_need_sweep)
                 // Not marked.
                 return true;
 
             if (marked_status != WOOMEM_GC_MARKED_RELEASED)
             {
                 // Reset marking state.
+                // ATTENTION: 无论是否是本轮新生对象，GC 都需要重设标记状态
+                //          否则会导致下次标记漏标
+
                 m_gc_marked.store(
                     WOOMEM_GC_MARKED_UNMARKED,
                     memory_order::memory_order_relaxed);
