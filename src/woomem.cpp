@@ -66,6 +66,8 @@ static constexpr size_t WOOMEM_GC_TRIGGER_ALLOC_MIN = 4 * 1024 * 1024;
 #   define WOOMEM_PAUSE()       ((void)0)
 #endif
 
+#define WOOMEM_ENABLE_LARGE_UNIT_PAGES
+
 namespace woomem_cppimpl
 {
     class RWSpin
@@ -282,6 +284,7 @@ namespace woomem_cppimpl
         1,
         1,
 
+#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
         // LARGE_PAGES
         1,
         2,
@@ -299,12 +302,16 @@ namespace woomem_cppimpl
         14,
         15,
         16,
+#endif
     };
+
+#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
     static_assert(
         PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_1] == 1
         && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_2] == 2
         && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_16] == 16,
         "PAGE_GROUP_NEED_PAGE_COUNTS must be correct.");
+#endif
 
     constexpr size_t UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[] =
     {
@@ -315,8 +322,10 @@ namespace woomem_cppimpl
         1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824,
 
         // Large page groups
+#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
         65504, 131040, 196576, 262112, 327648, 393184, 458720, 524256,
         589792, 655328, 720864, 786400, 851936, 917472, 983008, 1048544,
+#endif
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
@@ -487,11 +496,13 @@ namespace woomem_cppimpl
         if (size <= 21824)
             return MIDIUM_21824;
 
+#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
         if (size <= MOST_LARGE_UNIT_SIZE)
         {
             return static_cast<PageGroupType>(
                 LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) / PAGE_SIZE));
         }
+#endif
         return HUGE_UNIT;
     }
 
@@ -1120,8 +1131,10 @@ namespace woomem_cppimpl
                 }
                 else
                 {
-                    assert(may_valid_addr > &unit_belong_page->m_page_head + 1
-                        && may_valid_addr < unit_belong_page + 1);
+                    if (may_valid_addr <= &unit_belong_page->m_page_head + 1)
+                        return nullptr;
+
+                    assert(may_valid_addr < unit_belong_page + 1);
 
                     const size_t unit_size_with_unit_head =
                         sizeof(UnitHead) +
@@ -1189,6 +1202,7 @@ namespace woomem_cppimpl
         atomic<Chunk*> m_current_chunk;
         AddrToBlockFastLookupTable m_addr_to_chunk_table;
 
+        atomic<Page*> m_empty_page_list;
         atomic<Page*> m_free_group_page_list[FAST_AND_MIDIUM_GROUP_COUNT];
 
         // 用于储存可分配的大对象和巨型对象实例，注意，TOTAL_GROUP_COUNT 的前 
@@ -1276,7 +1290,27 @@ namespace woomem_cppimpl
                 WOOMEM_PAUSE();
             }
 
-            // No free page in pool, allocate a new one from Chunk
+            // No free page in group pool, try empty page list
+            free_page = m_empty_page_list.load(memory_order::memory_order_acquire);
+
+            while (free_page != nullptr)
+            {
+                if (m_empty_page_list.compare_exchange_weak(
+                    free_page,
+                    free_page->m_page_head.m_next_page,
+                    memory_order::memory_order_acq_rel,
+                    memory_order::memory_order_acquire))
+                {
+                    // Successfully got an empty page, reinit for requested group
+                    free_page->m_page_head.m_next_page = nullptr;
+                    free_page->reinit_page_with_group(group_type);
+                    return free_page;
+                }
+                // CAS failed, free_page is updated to current value, retry
+                WOOMEM_PAUSE();
+            }
+
+            // No empty page either, allocate a new one from Chunk
             return reinterpret_cast<Page*>(allocate_new_page(group_type));
         }
         void return_free_page(Page* freeing_page) noexcept
@@ -1290,6 +1324,20 @@ namespace woomem_cppimpl
             while (!group.compare_exchange_weak(
                 freeing_page->m_page_head.m_next_page,
                 freeing_page,
+                memory_order::memory_order_release,
+                memory_order::memory_order_relaxed))
+            {
+                WOOMEM_PAUSE();
+            }
+        }
+        void return_empty_page(Page* empty_page) noexcept
+        {
+            empty_page->m_page_head.m_next_page =
+                m_empty_page_list.load(memory_order::memory_order_relaxed);
+
+            while (!m_empty_page_list.compare_exchange_weak(
+                empty_page->m_page_head.m_next_page,
+                empty_page,
                 memory_order::memory_order_release,
                 memory_order::memory_order_relaxed))
             {
@@ -1904,6 +1952,8 @@ namespace woomem_cppimpl
         for (auto& free_page_group_page : m_free_group_page_list)
             free_page_group_page.store(nullptr, memory_order::memory_order_relaxed);
 
+        m_empty_page_list.store(nullptr, memory_order::memory_order_relaxed);
+
         for (auto& free_large_unit_list : m_free_large_unit_list)
             free_large_unit_list.store(nullptr, memory_order::memory_order_relaxed);
 
@@ -2194,12 +2244,15 @@ namespace woomem_cppimpl
                                 const size_t total_units_in_page =
                                     (PAGE_SIZE - sizeof(PageHead)) / page_unit_size_with_head;
 
-                                if (free_unit_count >= (total_units_in_page >> 2))
+                                if (free_unit_count >= (total_units_in_page >> 3))
                                 {
                                     current_page->m_page_head.m_abondon_page_flag.store(
                                         false, memory_order::memory_order_relaxed);
 
-                                    g_global_page_collection.return_free_page(current_page);
+                                    if (free_unit_count == total_units_in_page)
+                                        g_global_page_collection.return_empty_page(current_page);
+                                    else
+                                        g_global_page_collection.return_free_page(current_page);
                                 }
                             }
 
