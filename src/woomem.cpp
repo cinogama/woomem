@@ -601,8 +601,9 @@ namespace woomem_cppimpl
             const uint8_t marked_status =
                 m_gc_marked.load(memory_order::memory_order_relaxed);
 
-            // NOTE: Unit here cannot be marked uncomplete.
-            assert(marked_status != WOOMEM_GC_MARKED_SELF_MARKED);
+            // NOTE: Unit here cannot be marked uncomplete, unless its a new born.
+            assert(marked_status != WOOMEM_GC_MARKED_SELF_MARKED
+                || donot_need_sweep);
 
             if (marked_status == WOOMEM_GC_MARKED_UNMARKED && !donot_need_sweep)
                 // Not marked.
@@ -1118,6 +1119,23 @@ namespace woomem_cppimpl
                 size_t located_page_idx = static_cast<size_t>(
                     reinterpret_cast<intptr_t>(may_valid_addr)
                     - reinterpret_cast<intptr_t>(storage_belong_chunk->m_reserved_address_begin)) / PAGE_SIZE;
+
+                /*
+                NOTE: 此处使用 relaxed 即可：
+                    考虑：
+                    1）页面的提交发生在 GC 之前，如果这样，GC 同步点之后至少保证 读取到的
+                        m_commited_page_count 是GC时的最新点
+                    2）页面的提交发生在 GC 之后，如果是这样，新分配的单元无需标记，因此此处
+                        跳过没有风险；此外，对新分配的单元内的写入有混合写屏障保证，因此也不
+                        会出问题
+                    综上。
+                */
+                if (located_page_idx >= storage_belong_chunk->m_commited_page_count.load(
+                    memory_order::memory_order_relaxed))
+                {
+                    // This page has not been commited yet.
+                    return nullptr;
+                }
 
                 located_page_idx -= storage_belong_chunk->m_multipage_offset[located_page_idx];
 
