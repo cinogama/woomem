@@ -66,7 +66,7 @@ static constexpr size_t WOOMEM_GC_TRIGGER_ALLOC_MIN = 4 * 1024 * 1024;
 #   define WOOMEM_PAUSE()       ((void)0)
 #endif
 
-#define WOOMEM_ENABLE_LARGE_UNIT_PAGES
+/* #define WOOMEM_ENABLE_LARGE_UNIT_PAGES */
 
 namespace woomem_cppimpl
 {
@@ -235,11 +235,11 @@ namespace woomem_cppimpl
         MIDIUM_9344,
         MIDIUM_13088,
         MIDIUM_21824,
+        MIDIUM_65504,
 
         FAST_AND_MIDIUM_GROUP_COUNT,
 
-        LARGE_PAGES_1 = FAST_AND_MIDIUM_GROUP_COUNT,
-        LARGE_PAGES_2,
+        LARGE_PAGES_2 = FAST_AND_MIDIUM_GROUP_COUNT,
         LARGE_PAGES_3,
         LARGE_PAGES_4,
         LARGE_PAGES_5,
@@ -283,10 +283,10 @@ namespace woomem_cppimpl
         1,
         1,
         1,
-
-#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
-        // LARGE_PAGES
         1,
+
+        // LARGE_PAGES
+#ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
         2,
         3,
         4,
@@ -307,7 +307,6 @@ namespace woomem_cppimpl
 
 #ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
     static_assert(
-        PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_1] == 1
         && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_2] == 2
         && PAGE_GROUP_NEED_PAGE_COUNTS[PageGroupType::LARGE_PAGES_16] == 16,
         "PAGE_GROUP_NEED_PAGE_COUNTS must be correct.");
@@ -319,17 +318,17 @@ namespace woomem_cppimpl
         8, 24, 40, 56, 88, 128, 192, 264, 344, 488, 704, 920, 1024,
 
         // Medium page groups
-        1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824,
+        1440, 2168, 3104, 4352, 6536, 9344, 13088, 21824, 65504,
 
         // Large page groups
 #ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
-        65504, 131040, 196576, 262112, 327648, 393184, 458720, 524256,
+        131040, 196576, 262112, 327648, 393184, 458720, 524256,
         589792, 655328, 720864, 786400, 851936, 917472, 983008, 1048544,
 #endif
     };
     static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::SMALL_1024] == 1024,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
-    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_21824] == 21824,
+    static_assert(UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[PageGroupType::MIDIUM_65504] == 65504,
         "UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP must be correct.");
 
     constexpr size_t MAX_SMALL_UNIT_SIZE = 1024;
@@ -495,12 +494,14 @@ namespace woomem_cppimpl
             return MIDIUM_13088;
         if (size <= 21824)
             return MIDIUM_21824;
+        if (size <= 65504)
+            return MIDIUM_65504;
 
 #ifdef WOOMEM_ENABLE_LARGE_UNIT_PAGES
         if (size <= MOST_LARGE_UNIT_SIZE)
         {
             return static_cast<PageGroupType>(
-                LARGE_PAGES_1 + ((size + LARGE_SPACE_HEAD_SIZE - 1) / PAGE_SIZE));
+                MIDIUM_65504 + ((size + LARGE_SPACE_HEAD_SIZE - 1) / PAGE_SIZE));
         }
 #endif
         return HUGE_UNIT;
@@ -635,7 +636,7 @@ namespace woomem_cppimpl
         void reinit_page_with_group(PageGroupType group_type) noexcept
         {
             // Only empty and new page can be reinit.
-            assert(group_type < PageGroupType::LARGE_PAGES_1);
+            assert(group_type < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT);
 
             m_page_head.m_next_page = nullptr;
             m_page_head.m_page_belong_to_group = group_type;
@@ -877,7 +878,7 @@ namespace woomem_cppimpl
             {
                 // Init this page.
                 // NOTE: Even we commit multiple pages, only the first page need init.
-                if (page_group < PageGroupType::LARGE_PAGES_1)
+                if (page_group < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT)
                 {
                     Page* const now_alloc_page = reinterpret_cast<Page*>(new_alloc_page);
 
@@ -1142,7 +1143,7 @@ namespace woomem_cppimpl
                 Page* const unit_belong_page =
                     &storage_belong_chunk->m_reserved_address_begin[located_page_idx];
 
-                if (unit_belong_page->m_page_head.m_page_belong_to_group >= LARGE_PAGES_1)
+                if (unit_belong_page->m_page_head.m_page_belong_to_group >= FAST_AND_MIDIUM_GROUP_COUNT)
                 {
                     // Large unit.
                     return &reinterpret_cast<LargePageUnitHead*>(unit_belong_page)->m_unit_head;
@@ -1726,7 +1727,7 @@ namespace woomem_cppimpl
         {
             const auto alloc_group = get_page_group_type_for_size(unit_size);
 
-            if (WOOMEM_LIKELY(alloc_group < PageGroupType::LARGE_PAGES_1))
+            if (WOOMEM_LIKELY(alloc_group < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT))
             {
                 auto& current_alloc_group = m_current_allocating_page_for_group[alloc_group];
 
@@ -1844,7 +1845,7 @@ namespace woomem_cppimpl
                 static_cast<uint8_t>(failed_group) + 1);
 
             for (; next <= PageGroupType::HUGE_UNIT;
-                 next = static_cast<PageGroupType>(static_cast<uint8_t>(next) + 1))
+                next = static_cast<PageGroupType>(static_cast<uint8_t>(next) + 1))
             {
                 if (next < PageGroupType::FAST_AND_MIDIUM_GROUP_COUNT)
                 {
@@ -2260,7 +2261,7 @@ namespace woomem_cppimpl
                             UINT_SIZE_FOR_PAGE_GROUP_TYPE_FAST_LOOKUP[
                                 current_page->m_page_head.m_page_belong_to_group];
 
-                        if (current_page->m_page_head.m_page_belong_to_group < LARGE_PAGES_1)
+                        if (current_page->m_page_head.m_page_belong_to_group < FAST_AND_MIDIUM_GROUP_COUNT)
                         {
                             // Is normal page.
                             const size_t page_unit_size_with_unit_head = sizeof(UnitHead) + page_unit_size;
