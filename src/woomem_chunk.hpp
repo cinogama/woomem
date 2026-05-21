@@ -2,6 +2,7 @@
 
 #include "woomem_page.hpp"
 
+#include <atomic>
 #include <cstdint>
 
 namespace woomem
@@ -24,28 +25,37 @@ namespace woomem
         Page* validate(void* ptr);
 
     private:
-        static constexpr uint32_t FREE_LIST_NULL = UINT32_MAX;
-        static constexpr uint8_t STATE_ALLOCATED = 0x01;
-        static constexpr uint8_t STATE_ORDER_SHIFT = 1;
+        static constexpr uint32_t INDEX_NULL    = UINT32_MAX;
+        static constexpr uint64_t PACKED_NULL   = UINT64_MAX;
+        static constexpr uint8_t  STATE_ALLOCATED    = 0x01;
+        static constexpr uint8_t  STATE_ORDER_SHIFT  = 1;
 
         static size_t round_up_power_of_2(size_t v);
         static size_t ilog2(size_t v);
+
+        static uint64_t pack(uint32_t index, uint32_t counter);
+        static uint32_t unpack_index(uint64_t packed);
+        static uint32_t unpack_counter(uint64_t packed);
 
         size_t page_to_index(Page* page) const;
         Page* index_to_page(size_t idx) const;
         size_t addr_to_index(void* ptr) const;
 
-        void remove_from_free_list(size_t order, uint32_t target);
-
         Page* allocate_block(size_t order);
+        Page* try_allocate_block(size_t required_order);
+        void defragment_internal();
+        void remove_from_free_list_locked(size_t order, uint32_t target);
 
         void* base_;
         size_t reserved_size_;
         size_t total_pages_;
         size_t max_order_;
 
-        uint8_t* state_;
-        uint32_t* links_;
-        uint32_t* free_lists_;
+        std::atomic<uint8_t>*  state_;
+        std::atomic<uint64_t>* links_;
+        std::atomic<uint64_t>* free_lists_;
+
+        std::atomic<bool> defrag_in_progress_;
+        std::atomic<int>  active_ops_;
     };
 }

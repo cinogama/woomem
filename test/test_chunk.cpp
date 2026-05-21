@@ -1,8 +1,11 @@
 #include "woomem.h"
 #include "woomem_chunk.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+#include <vector>
 
 #ifdef _MSC_VER
 #define _CRTDBG_MAP_ALLOC
@@ -321,6 +324,167 @@ TEST(huge_page_boundary_case)
     chunk.free_page(p);
 }
 
+TEST(concurrent_alloc_free_128_pages)
+{
+    Chunk chunk(4 * 1024 * 1024);
+
+    constexpr int kPages = 128;
+    constexpr int kThreads = 4;
+    std::atomic<Page*> slots[kPages] = {};
+    std::atomic<int> next_idx{0};
+    std::atomic<int> alloc_count{0};
+    std::atomic<int> free_count{0};
+    std::atomic<bool> done{false};
+
+    auto alloc_worker = [&]()
+    {
+        while (true)
+        {
+            Page* p = chunk.allocate_page();
+            if (!p)
+            {
+                if (done.load(std::memory_order_acquire))
+                    break;
+                continue;
+            }
+            int slot = next_idx.fetch_add(1, std::memory_order_relaxed);
+            if (slot >= kPages)
+            {
+                chunk.free_page(p);
+                done.store(true, std::memory_order_release);
+                break;
+            }
+            slots[slot].store(p, std::memory_order_release);
+            alloc_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    auto free_worker = [&]()
+    {
+        while (true)
+        {
+            bool any_freed = false;
+            for (int i = 0; i < kPages; i++)
+            {
+                Page* p = slots[i].load(std::memory_order_acquire);
+                if (p && slots[i].compare_exchange_strong(p, nullptr,
+                        std::memory_order_acquire, std::memory_order_relaxed))
+                {
+                    CHECK_EQ(chunk.validate(p), p);
+                    chunk.free_page(p);
+                    free_count.fetch_add(1, std::memory_order_relaxed);
+                    any_freed = true;
+                }
+            }
+            if (!any_freed && done.load(std::memory_order_acquire) &&
+                alloc_count.load(std::memory_order_relaxed) >= kPages)
+                break;
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; i++)
+        threads.emplace_back(alloc_worker);
+    for (int i = 0; i < 2; i++)
+        threads.emplace_back(free_worker);
+
+    for (auto& t : threads)
+        t.join();
+
+    CHECK(alloc_count.load() >= kPages);
+}
+
+TEST(concurrent_mixed_alloc_free)
+{
+    Chunk chunk(2 * 1024 * 1024);
+    constexpr int kIterations = 500;
+    constexpr int kThreads = 4;
+    std::atomic<int> ops{0};
+
+    auto worker = [&]()
+    {
+        for (int i = 0; i < kIterations; i++)
+        {
+            Page* a = chunk.allocate_page();
+            if (!a)
+                continue;
+
+            Page* b = chunk.allocate_page();
+            if (!b)
+            {
+                chunk.free_page(a);
+                continue;
+            }
+
+            CHECK_NE(a, b);
+            CHECK_EQ(chunk.validate(a), a);
+            CHECK_EQ(chunk.validate(b), b);
+
+            chunk.free_page(a);
+            chunk.free_page(b);
+            ops.fetch_add(1, std::memory_order_relaxed);
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; i++)
+        threads.emplace_back(worker);
+
+    for (auto& t : threads)
+        t.join();
+
+    CHECK(ops.load() > 0);
+}
+
+TEST(concurrent_huge_page_and_validate)
+{
+    Chunk chunk(4 * 1024 * 1024);
+    std::atomic<bool> stop{false};
+
+    auto alloc_worker = [&]()
+    {
+        for (int i = 0; i < 200; i++)
+        {
+            Page* p = chunk.allocate_page();
+            if (p)
+            {
+                CHECK_EQ(chunk.validate(p), p);
+                chunk.free_page(p);
+            }
+            else
+            {
+                break;
+            }
+        }
+    };
+
+    auto huge_worker = [&]()
+    {
+        for (int i = 0; i < 50; i++)
+        {
+            Page* p = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
+            if (p)
+            {
+                void* interior = reinterpret_cast<char*>(p) + Page::NORMAL_PAGE_SIZE + 100;
+                CHECK_EQ(chunk.validate(interior), p);
+                chunk.free_page(p);
+            }
+            else
+            {
+                break;
+            }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 3; i++)
+        threads.emplace_back(alloc_worker);
+    threads.emplace_back(huge_worker);
+
+    for (auto& t : threads)
+        t.join();
+}
+
 int test_chunk_main(void)
 {
 #ifdef _MSC_VER
@@ -359,6 +523,9 @@ int test_chunk_main(void)
     RUN_TEST(multi_chunk_isolation);
     RUN_TEST(alloc_free_alloc_cycle);
     RUN_TEST(huge_page_boundary_case);
+    RUN_TEST(concurrent_alloc_free_128_pages);
+    RUN_TEST(concurrent_mixed_alloc_free);
+    RUN_TEST(concurrent_huge_page_and_validate);
 
     std::printf("\n=== %d failures ===\n", g_failures);
     return g_failures > 0 ? 1 : 0;
