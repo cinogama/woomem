@@ -24,6 +24,8 @@ namespace woomem
 
         Page* validate(void* ptr);
 
+        void defragment();
+
     private:
         static constexpr uint32_t INDEX_NULL    = UINT32_MAX;
         static constexpr uint64_t PACKED_NULL   = UINT64_MAX;
@@ -42,9 +44,7 @@ namespace woomem
         size_t addr_to_index(void* ptr) const;
 
         Page* allocate_block(size_t order);
-        Page* try_allocate_block(size_t required_order);
-        void defragment_internal();
-        void remove_from_free_list_locked(size_t order, uint32_t target);
+        void remove_from_free_list_defrag(size_t order, uint32_t target);
 
         void* base_;
         size_t reserved_size_;
@@ -54,8 +54,5 @@ namespace woomem
         std::atomic<uint8_t>*  state_;
         std::atomic<uint64_t>* links_;
         std::atomic<uint64_t>* free_lists_;
-
-        std::atomic<bool> defrag_in_progress_;
-        std::atomic<int>  active_ops_;
     };
 }

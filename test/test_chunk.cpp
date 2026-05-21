@@ -247,6 +247,7 @@ TEST(buddy_coalesce_all_to_max_order)
     }
     for (int i = 0; i < 32; i++)
         chunk.free_page(pages[i]);
+    chunk.defragment();
     Page* huge = chunk.allocate_huge_page(32 * Page::NORMAL_PAGE_SIZE);
     CHECK(huge != nullptr);
     chunk.free_page(huge);
@@ -261,6 +262,7 @@ TEST(buddy_coalesce_to_order_1)
     CHECK(p1 != nullptr);
     chunk.free_page(p0);
     chunk.free_page(p1);
+    chunk.defragment();
     Page* p2 = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
     chunk.free_page(p2);
@@ -273,9 +275,12 @@ TEST(buddy_no_coalesce_when_still_allocated)
     Page* p1 = chunk.allocate_page();
     CHECK(p0 != nullptr);
     CHECK(p1 != nullptr);
+    CHECK_EQ(p1, reinterpret_cast<Page*>(reinterpret_cast<char*>(p0) + Page::NORMAL_PAGE_SIZE));
     chunk.free_page(p1);
+    chunk.defragment();
     Page* p2 = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
+    CHECK_NE(p2, p0);
     chunk.free_page(p0);
     chunk.free_page(p2);
 }
@@ -366,9 +371,8 @@ TEST(concurrent_alloc_free_128_pages)
             bool any_freed = false;
             for (int i = 0; i < kPages; i++)
             {
-                Page* p = slots[i].load(std::memory_order_acquire);
-                if (p && slots[i].compare_exchange_strong(p, nullptr,
-                        std::memory_order_acquire, std::memory_order_relaxed))
+                Page* p = slots[i].exchange(nullptr, std::memory_order_acq_rel);
+                if (p)
                 {
                     CHECK_EQ(chunk.validate(p), p);
                     chunk.free_page(p);

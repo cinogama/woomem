@@ -6,12 +6,6 @@
 #include <cstdlib>
 #include <cstring>
 
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <thread>
-#endif
-
 namespace woomem
 {
 
@@ -56,17 +50,7 @@ uint32_t Chunk::unpack_counter(uint64_t packed)
     return static_cast<uint32_t>(packed >> 32);
 }
 
-static void cpu_relax()
-{
-#ifdef _MSC_VER
-    _mm_pause();
-#else
-    std::this_thread::yield();
-#endif
-}
-
 Chunk::Chunk(size_t reserved_size)
-    : defrag_in_progress_(false), active_ops_(0)
 {
     size_t pages = (reserved_size + Page::NORMAL_PAGE_SIZE - 1) / Page::NORMAL_PAGE_SIZE;
     total_pages_ = round_up_power_of_2(pages);
@@ -144,7 +128,7 @@ size_t Chunk::addr_to_index(void* ptr) const
         / Page::NORMAL_PAGE_SIZE;
 }
 
-void Chunk::remove_from_free_list_locked(size_t order, uint32_t target)
+void Chunk::remove_from_free_list_defrag(size_t order, uint32_t target)
 {
     uint64_t prev_packed = PACKED_NULL;
     uint64_t curr_packed = free_lists_[order].load(std::memory_order_relaxed);
@@ -166,56 +150,11 @@ void Chunk::remove_from_free_list_locked(size_t order, uint32_t target)
     }
 }
 
-void Chunk::defragment_internal()
+Page* Chunk::allocate_block(size_t required_order)
 {
-    if (!base_)
-        return;
+    if (!base_ || required_order > max_order_)
+        return nullptr;
 
-    for (size_t order = 0; order < max_order_; order++)
-    {
-        size_t stride = static_cast<size_t>(1) << (order + 1);
-        for (size_t i = 0; i < total_pages_; i += stride)
-        {
-            uint32_t idx = static_cast<uint32_t>(i);
-            uint32_t buddy = idx | static_cast<uint32_t>(size_t(1) << order);
-            if (buddy >= total_pages_)
-                continue;
-
-            uint8_t st_a = state_[idx].load(std::memory_order_relaxed);
-            if (st_a & STATE_ALLOCATED)
-                continue;
-            if ((st_a >> STATE_ORDER_SHIFT) != order)
-                continue;
-
-            uint8_t st_b = state_[buddy].load(std::memory_order_relaxed);
-            if (st_b & STATE_ALLOCATED)
-                continue;
-            if ((st_b >> STATE_ORDER_SHIFT) != order)
-                continue;
-
-            if (idx != (idx & ~(stride - 1)))
-                continue;
-
-            remove_from_free_list_locked(order, idx);
-            remove_from_free_list_locked(order, buddy);
-
-            uint32_t merged_idx = (buddy < idx) ? buddy : idx;
-            size_t new_order = order + 1;
-
-            state_[merged_idx].store(
-                static_cast<uint8_t>(new_order << STATE_ORDER_SHIFT),
-                std::memory_order_relaxed);
-
-            uint64_t head = free_lists_[new_order].load(std::memory_order_relaxed);
-            links_[merged_idx].store(head, std::memory_order_relaxed);
-            uint64_t new_packed = pack(merged_idx, unpack_counter(head) + 1);
-            free_lists_[new_order].store(new_packed, std::memory_order_relaxed);
-        }
-    }
-}
-
-Page* Chunk::try_allocate_block(size_t required_order)
-{
     size_t block_pages = static_cast<size_t>(1) << required_order;
     size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
 
@@ -284,50 +223,6 @@ Page* Chunk::try_allocate_block(size_t required_order)
     }
 }
 
-Page* Chunk::allocate_block(size_t required_order)
-{
-    if (!base_ || required_order > max_order_)
-        return nullptr;
-
-    for (int attempt = 0; attempt < 2; attempt++)
-    {
-        while (defrag_in_progress_.load(std::memory_order_acquire))
-            cpu_relax();
-
-        active_ops_.fetch_add(1, std::memory_order_acquire);
-
-        if (defrag_in_progress_.load(std::memory_order_acquire))
-        {
-            active_ops_.fetch_sub(1, std::memory_order_release);
-            continue;
-        }
-
-        Page* result = try_allocate_block(required_order);
-
-        active_ops_.fetch_sub(1, std::memory_order_release);
-
-        if (result)
-            return result;
-
-        if (attempt == 0)
-        {
-            bool expected = false;
-            if (defrag_in_progress_.compare_exchange_strong(expected, true,
-                    std::memory_order_acquire, std::memory_order_relaxed))
-            {
-                while (active_ops_.load(std::memory_order_acquire) > 0)
-                    cpu_relax();
-
-                defragment_internal();
-
-                defrag_in_progress_.store(false, std::memory_order_release);
-            }
-        }
-    }
-
-    return nullptr;
-}
-
 Page* Chunk::allocate_page()
 {
     return allocate_block(0);
@@ -349,36 +244,14 @@ void Chunk::free_page(Page* page)
     if (!base_ || !page)
         return;
 
-    for (;;)
-    {
-        while (defrag_in_progress_.load(std::memory_order_acquire))
-            cpu_relax();
-
-        active_ops_.fetch_add(1, std::memory_order_acquire);
-
-        if (defrag_in_progress_.load(std::memory_order_acquire))
-        {
-            active_ops_.fetch_sub(1, std::memory_order_release);
-            continue;
-        }
-
-        break;
-    }
-
     size_t idx = page_to_index(page);
     if (idx >= total_pages_)
-    {
-        active_ops_.fetch_sub(1, std::memory_order_release);
         return;
-    }
 
     uint8_t st = state_[idx].load(std::memory_order_acquire);
 
     if (!(st & STATE_ALLOCATED))
-    {
-        active_ops_.fetch_sub(1, std::memory_order_release);
         return;
-    }
 
     size_t order = st >> STATE_ORDER_SHIFT;
     size_t block_pages = static_cast<size_t>(1) << order;
@@ -387,10 +260,7 @@ void Chunk::free_page(Page* page)
     size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
     if (woomem_os_decommit_memory(decommit_addr, decommit_size) != 0)
-    {
-        active_ops_.fetch_sub(1, std::memory_order_release);
         return;
-    }
 
     for (size_t j = 0; j < block_pages; j++)
         state_[idx + j].store(0, std::memory_order_release);
@@ -406,8 +276,6 @@ void Chunk::free_page(Page* page)
     } while (!free_lists_[order].compare_exchange_weak(head,
             pack(static_cast<uint32_t>(idx), unpack_counter(head) + 1),
             std::memory_order_release, std::memory_order_relaxed));
-
-    active_ops_.fetch_sub(1, std::memory_order_release);
 }
 
 Page* Chunk::validate(void* ptr)
@@ -430,6 +298,54 @@ Page* Chunk::validate(void* ptr)
     size_t start_idx = idx & ~(block_pages - 1);
 
     return index_to_page(start_idx);
+}
+
+void Chunk::defragment()
+{
+    if (!base_)
+        return;
+
+    for (size_t order = 0; order < max_order_; order++)
+    {
+        size_t stride = static_cast<size_t>(1) << (order + 1);
+        for (size_t i = 0; i < total_pages_; i += stride)
+        {
+            uint32_t idx = static_cast<uint32_t>(i);
+            uint32_t buddy = idx | static_cast<uint32_t>(size_t(1) << order);
+            if (buddy >= total_pages_)
+                continue;
+
+            uint8_t st_a = state_[idx].load(std::memory_order_relaxed);
+            if (st_a & STATE_ALLOCATED)
+                continue;
+            if ((st_a >> STATE_ORDER_SHIFT) != order)
+                continue;
+
+            uint8_t st_b = state_[buddy].load(std::memory_order_relaxed);
+            if (st_b & STATE_ALLOCATED)
+                continue;
+            if ((st_b >> STATE_ORDER_SHIFT) != order)
+                continue;
+
+            if (idx != (idx & ~(stride - 1)))
+                continue;
+
+            remove_from_free_list_defrag(order, idx);
+            remove_from_free_list_defrag(order, buddy);
+
+            uint32_t merged_idx = (buddy < idx) ? buddy : idx;
+            size_t new_order = order + 1;
+
+            state_[merged_idx].store(
+                static_cast<uint8_t>(new_order << STATE_ORDER_SHIFT),
+                std::memory_order_relaxed);
+
+            uint64_t head = free_lists_[new_order].load(std::memory_order_relaxed);
+            links_[merged_idx].store(head, std::memory_order_relaxed);
+            uint64_t new_packed = pack(merged_idx, unpack_counter(head) + 1);
+            free_lists_[new_order].store(new_packed, std::memory_order_relaxed);
+        }
+    }
 }
 
 }
