@@ -3,6 +3,7 @@ namespace woomem
     struct Page
     {
         static constexpr size_t NORMAL_PAGE_SIZE = 32768;
+
         char _reserved_[NORMAL_PAGE_SIZE];
 
         Page() = default;

@@ -360,20 +360,31 @@ TEST(validate_under_pressure)
     auto validate_worker = [&](int tid)
     {
         std::mt19937 rng(static_cast<unsigned>(tid + 5000));
-        std::uniform_int_distribution<ptrdiff_t> offset(0, 7 * 1024 * 1024);
+        std::uniform_int_distribution<ptrdiff_t> off_dist(1, kPageSize - 1);
 
         while (!stop.load(std::memory_order_relaxed))
         {
-            void* ptr = reinterpret_cast<char*>(
-                reinterpret_cast<char*>(&chunk) + 1 + offset(rng)) + 1;
-
-            Page* result = chunk.validate(ptr);
-            validate_ops.fetch_add(1, std::memory_order_relaxed);
-
-            if (result != nullptr)
+            Page* p = chunk.allocate_page();
+            if (!p)
             {
-                validate_ok.fetch_add(1, std::memory_order_relaxed);
+                spin_yield();
+                continue;
             }
+
+            // Validate at page start — should always return p
+            Page* result = chunk.validate(p);
+            validate_ops.fetch_add(1, std::memory_order_relaxed);
+            if (result != nullptr)
+                validate_ok.fetch_add(1, std::memory_order_relaxed);
+
+            // Validate an interior offset within the same page
+            void* interior = reinterpret_cast<char*>(p) + off_dist(rng);
+            result = chunk.validate(interior);
+            validate_ops.fetch_add(1, std::memory_order_relaxed);
+            if (result != nullptr)
+                validate_ok.fetch_add(1, std::memory_order_relaxed);
+
+            chunk.free_page(p);
         }
     };
 
@@ -892,7 +903,7 @@ TEST(zigzag_order_allocation)
 
             CHECK_EQ(chunk.validate(huge), huge);
 
-            Page* small[4];
+            Page* small[4] = {};
             for (int s = 0; s < 4; s++)
                 small[s] = chunk.allocate_page();
 

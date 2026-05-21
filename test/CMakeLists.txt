@@ -11,3 +11,5 @@ add_executable(woomem_test
 target_link_libraries(woomem_test 
     PRIVATE woomem
     PRIVATE woomem_options)
+
+add_test (NAME woomem_test COMMAND woomem_test)
