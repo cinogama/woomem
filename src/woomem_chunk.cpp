@@ -190,7 +190,7 @@ Page* Chunk::allocate_block(size_t required_order)
             do
             {
                 head = free_lists_[order].load(std::memory_order_acquire);
-                links_[idx].store(head, std::memory_order_relaxed);
+                links_[idx].store(head, std::memory_order_release);
             } while (!free_lists_[order].compare_exchange_weak(head,
                     pack(idx, unpack_counter(head) + 1),
                     std::memory_order_release, std::memory_order_relaxed));
@@ -209,7 +209,7 @@ Page* Chunk::allocate_block(size_t required_order)
             do
             {
                 head = free_lists_[order].load(std::memory_order_acquire);
-                links_[buddy].store(head, std::memory_order_relaxed);
+                links_[buddy].store(head, std::memory_order_release);
             } while (!free_lists_[order].compare_exchange_weak(head,
                     pack(buddy, unpack_counter(head) + 1),
                     std::memory_order_release, std::memory_order_relaxed));
@@ -257,22 +257,30 @@ void Chunk::free_page(Page* page)
     size_t block_pages = static_cast<size_t>(1) << order;
     idx = idx & ~(block_pages - 1);
 
+    uint8_t expected = st;
+    uint8_t freed_state = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
+    if (!state_[idx].compare_exchange_strong(expected, freed_state,
+            std::memory_order_acq_rel, std::memory_order_acquire))
+    {
+        return;
+    }
+
     size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
     if (woomem_os_decommit_memory(decommit_addr, decommit_size) != 0)
+    {
+        state_[idx].store(st, std::memory_order_release);
         return;
+    }
 
-    for (size_t j = 0; j < block_pages; j++)
+    for (size_t j = 1; j < block_pages; j++)
         state_[idx + j].store(0, std::memory_order_release);
-
-    state_[idx].store(static_cast<uint8_t>(order << STATE_ORDER_SHIFT),
-        std::memory_order_release);
 
     uint64_t head;
     do
     {
         head = free_lists_[order].load(std::memory_order_acquire);
-        links_[idx].store(head, std::memory_order_relaxed);
+        links_[idx].store(head, std::memory_order_release);
     } while (!free_lists_[order].compare_exchange_weak(head,
             pack(static_cast<uint32_t>(idx), unpack_counter(head) + 1),
             std::memory_order_release, std::memory_order_relaxed));
