@@ -138,12 +138,19 @@ Page* Chunk::allocate_block(size_t required_order)
         return nullptr;
 
     uint32_t idx = free_lists_[order];
+
+    size_t block_pages = static_cast<size_t>(1) << required_order;
+    size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
+    void* commit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
+    if (woomem_os_commit_memory(commit_addr, commit_size) != 0)
+        return nullptr;
+
     free_lists_[order] = links_[idx];
 
     while (order > required_order)
     {
         order--;
-        uint32_t buddy = idx | (1u << order);
+        uint32_t buddy = idx | static_cast<uint32_t>(size_t(1) << order);
 
         state_[buddy] = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
         links_[buddy] = free_lists_[order];
@@ -151,13 +158,8 @@ Page* Chunk::allocate_block(size_t required_order)
     }
 
     uint8_t alloc_state = static_cast<uint8_t>((order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
-    size_t block_pages = static_cast<size_t>(1) << order;
     for (size_t j = 0; j < block_pages; j++)
         state_[idx + j] = alloc_state;
-
-    size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
-    void* commit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
-    woomem_os_commit_memory(commit_addr, commit_size);
 
     return index_to_page(idx);
 }
@@ -195,7 +197,8 @@ void Chunk::free_page(Page* page)
 
     size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
-    woomem_os_decommit_memory(decommit_addr, decommit_size);
+    if (woomem_os_decommit_memory(decommit_addr, decommit_size) != 0)
+        return;
 
     for (size_t j = 0; j < block_pages; j++)
         state_[idx + j] = 0;
@@ -204,7 +207,7 @@ void Chunk::free_page(Page* page)
 
     while (true)
     {
-        uint32_t buddy = static_cast<uint32_t>(idx) ^ (1u << order);
+        uint32_t buddy = static_cast<uint32_t>(idx) ^ static_cast<uint32_t>(size_t(1) << order);
 
         if (buddy >= total_pages_)
             break;
@@ -231,11 +234,11 @@ Page* Chunk::validate(void* ptr)
     if (!base_ || !ptr)
         return nullptr;
 
-    size_t offset = static_cast<size_t>(static_cast<char*>(ptr) - static_cast<char*>(base_));
-    if (offset >= reserved_size_)
+    ptrdiff_t diff = static_cast<char*>(ptr) - static_cast<char*>(base_);
+    if (diff < 0 || static_cast<size_t>(diff) >= reserved_size_)
         return nullptr;
 
-    size_t idx = offset / Page::NORMAL_PAGE_SIZE;
+    size_t idx = addr_to_index(ptr);
 
     uint8_t st = state_[idx];
     if (!(st & STATE_ALLOCATED))
