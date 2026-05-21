@@ -257,13 +257,19 @@ void Chunk::free_page(Page* page)
     size_t block_pages = static_cast<size_t>(1) << order;
     idx = idx & ~(block_pages - 1);
 
+    uint8_t expected = static_cast<uint8_t>((order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
+    if (!state_[idx].compare_exchange_strong(expected, 0,
+            std::memory_order_acquire, std::memory_order_relaxed))
+    {
+        return;
+    }
+
+    for (size_t j = 1; j < block_pages; j++)
+        state_[idx + j].store(0, std::memory_order_release);
+
     size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
-    if (woomem_os_decommit_memory(decommit_addr, decommit_size) != 0)
-        return;
-
-    for (size_t j = 0; j < block_pages; j++)
-        state_[idx + j].store(0, std::memory_order_release);
+    woomem_os_decommit_memory(decommit_addr, decommit_size);
 
     state_[idx].store(static_cast<uint8_t>(order << STATE_ORDER_SHIFT),
         std::memory_order_release);
