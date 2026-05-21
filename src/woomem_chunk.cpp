@@ -150,11 +150,10 @@ Page* Chunk::allocate_block(size_t required_order)
         free_lists_[order] = buddy;
     }
 
-    state_[idx] = static_cast<uint8_t>((order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
-
+    uint8_t alloc_state = static_cast<uint8_t>((order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
     size_t block_pages = static_cast<size_t>(1) << order;
-    for (size_t j = 1; j < block_pages; j++)
-        state_[idx + j] = STATE_ALLOCATED;
+    for (size_t j = 0; j < block_pages; j++)
+        state_[idx + j] = alloc_state;
 
     size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* commit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
@@ -192,6 +191,7 @@ void Chunk::free_page(Page* page)
 
     size_t order = st >> STATE_ORDER_SHIFT;
     size_t block_pages = static_cast<size_t>(1) << order;
+    idx = idx & ~(block_pages - 1);
 
     size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
     void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
@@ -237,10 +237,15 @@ Page* Chunk::validate(void* ptr)
 
     size_t idx = offset / Page::NORMAL_PAGE_SIZE;
 
-    if (!(state_[idx] & STATE_ALLOCATED))
+    uint8_t st = state_[idx];
+    if (!(st & STATE_ALLOCATED))
         return nullptr;
 
-    return index_to_page(idx);
+    size_t order = st >> STATE_ORDER_SHIFT;
+    size_t block_pages = static_cast<size_t>(1) << order;
+    size_t start_idx = idx & ~(block_pages - 1);
+
+    return index_to_page(start_idx);
 }
 
 }
