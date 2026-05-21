@@ -186,6 +186,8 @@ void Chunk::free_page(Page* page)
         return;
 
     size_t idx = page_to_index(page);
+    if (idx >= total_pages_)
+        return;
     uint8_t st = state_[idx];
 
     if (!(st & STATE_ALLOCATED))
