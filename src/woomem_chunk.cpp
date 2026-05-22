@@ -3,361 +3,300 @@
 
 #include "woomem_chunk.hpp"
 
-#include <cstdlib>
-#include <cstring>
-
 namespace woomem
 {
 
-size_t Chunk::round_up_power_of_2(size_t v)
+void SpinLock::lock() noexcept
 {
-    if (v == 0)
-        return 1;
-    v--;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v |= v >> 32;
-    v++;
-    return v;
-}
-
-size_t Chunk::ilog2(size_t v)
-{
-    size_t r = 0;
-    while (v > 1)
+    while (flag_.exchange(1, std::memory_order_acquire))
     {
-        v >>= 1;
-        r++;
+        while (flag_.load(std::memory_order_relaxed))
+        {
+#if defined(_MSC_VER)
+            _mm_pause();
+#elif defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#elif defined(__aarch64__) || defined(__arm__)
+            __asm__ __volatile__("yield" ::: "memory");
+#endif
+        }
     }
-    return r;
 }
 
-uint64_t Chunk::pack(uint32_t index, uint32_t counter)
+void SpinLock::unlock() noexcept
 {
-    return (static_cast<uint64_t>(counter) << 32) | index;
+    flag_.store(0, std::memory_order_release);
 }
 
-uint32_t Chunk::unpack_index(uint64_t packed)
+size_t Chunk::round_up_power_of_two(size_t n)
 {
-    return static_cast<uint32_t>(packed & 0xFFFFFFFFULL);
+    if (n == 0) return 1;
+    size_t p = 1;
+    while (p < n)
+        p <<= 1;
+    return p;
 }
 
-uint32_t Chunk::unpack_counter(uint64_t packed)
+int Chunk::ceil_log2(size_t n)
 {
-    return static_cast<uint32_t>(packed >> 32);
+    if (n <= 1) return 0;
+    int log = 0;
+    size_t p = 1;
+    while (p < n)
+    {
+        p <<= 1;
+        log++;
+    }
+    return log;
 }
 
 Chunk::Chunk(size_t reserved_size)
 {
-    size_t pages = (reserved_size + Page::NORMAL_PAGE_SIZE - 1) / Page::NORMAL_PAGE_SIZE;
-    total_pages_ = round_up_power_of_2(pages);
-    reserved_size_ = total_pages_ * Page::NORMAL_PAGE_SIZE;
-    max_order_ = ilog2(total_pages_);
+    const size_t page_size = Page::NORMAL_PAGE_SIZE;
 
-    base_ = woomem_os_reserve_memory(reserved_size_);
-    if (!base_)
+    if (reserved_size == 0)
+        return;
+
+    size_t aligned = (reserved_size + page_size - 1) & ~(page_size - 1);
+    size_t need_pages = aligned / page_size;
+    if (need_pages == 0) need_pages = 1;
+    total_pages_ = round_up_power_of_two(need_pages);
+
+    size_t total_bytes = total_pages_ * page_size;
+    max_order_ = ceil_log2(total_pages_);
+
+    pages_ = (Page*)woomem_os_reserve_memory(total_bytes);
+    if (!pages_)
     {
         total_pages_ = 0;
-        reserved_size_ = 0;
-        max_order_ = 0;
-        state_ = nullptr;
-        links_ = nullptr;
-        free_lists_ = nullptr;
+        max_order_ = -1;
         return;
     }
+    woomem_os_commit_memory(pages_, total_bytes);
 
-    state_ = new std::atomic<uint8_t>[total_pages_];
-    links_ = new std::atomic<uint64_t>[total_pages_];
-    free_lists_ = new std::atomic<uint64_t>[max_order_ + 1];
-
-    if (!state_ || !links_ || !free_lists_)
-    {
-        delete[] state_;
-        delete[] links_;
-        delete[] free_lists_;
-        state_ = nullptr;
-        links_ = nullptr;
-        free_lists_ = nullptr;
-        woomem_os_release_memory(base_, reserved_size_);
-        base_ = nullptr;
-        total_pages_ = 0;
-        reserved_size_ = 0;
-        max_order_ = 0;
-        return;
-    }
+    page_state_ = new uint16_t[total_pages_];
+    free_heads_ = new size_t[max_order_ + 1];
+    free_next_  = new size_t[total_pages_];
 
     for (size_t i = 0; i < total_pages_; i++)
-        state_[i].store(0, std::memory_order_relaxed);
+    {
+        page_state_[i] = 0;
+        free_next_[i] = SIZE_MAX;
+    }
+    for (int i = 0; i <= max_order_; i++)
+        free_heads_[i] = SIZE_MAX;
 
-    for (size_t i = 0; i <= max_order_; i++)
-        free_lists_[i].store(PACKED_NULL, std::memory_order_relaxed);
-
-    state_[0].store(static_cast<uint8_t>(max_order_ << STATE_ORDER_SHIFT),
-        std::memory_order_relaxed);
-    links_[0].store(PACKED_NULL, std::memory_order_relaxed);
-    free_lists_[max_order_].store(pack(0, 0), std::memory_order_relaxed);
+    page_state_[0] = FLAG_IS_HEAD | (uint16_t)max_order_;
+    free_heads_[max_order_] = 0;
 }
 
 Chunk::~Chunk()
 {
-    delete[] state_;
-    delete[] links_;
-    delete[] free_lists_;
-
-    if (base_)
-        woomem_os_release_memory(base_, reserved_size_);
-}
-
-size_t Chunk::page_to_index(Page* page) const
-{
-    return static_cast<size_t>(reinterpret_cast<char*>(page) - static_cast<char*>(base_))
-        / Page::NORMAL_PAGE_SIZE;
-}
-
-Page* Chunk::index_to_page(size_t idx) const
-{
-    return reinterpret_cast<Page*>(static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE);
-}
-
-size_t Chunk::addr_to_index(void* ptr) const
-{
-    return static_cast<size_t>(static_cast<char*>(ptr) - static_cast<char*>(base_))
-        / Page::NORMAL_PAGE_SIZE;
-}
-
-void Chunk::remove_from_free_list_defrag(size_t order, uint32_t target)
-{
-    uint64_t prev_packed = PACKED_NULL;
-    uint64_t curr_packed = free_lists_[order].load(std::memory_order_relaxed);
-
-    while (curr_packed != PACKED_NULL)
-    {
-        uint32_t curr_idx = unpack_index(curr_packed);
-        if (curr_idx == target)
-        {
-            uint64_t next = links_[target].load(std::memory_order_relaxed);
-            if (prev_packed == PACKED_NULL)
-                free_lists_[order].store(next, std::memory_order_relaxed);
-            else
-                links_[unpack_index(prev_packed)].store(next, std::memory_order_relaxed);
-            return;
-        }
-        prev_packed = curr_packed;
-        curr_packed = links_[curr_idx].load(std::memory_order_relaxed);
-    }
-}
-
-Page* Chunk::allocate_block(size_t required_order)
-{
-    if (!base_ || required_order > max_order_)
-        return nullptr;
-
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    size_t block_pages = static_cast<size_t>(1) << required_order;
-    size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
-
-    for (;;)
-    {
-        size_t order = required_order;
-        uint64_t packed = PACKED_NULL;
-
-        while (order <= max_order_)
-        {
-            packed = free_lists_[order].load(std::memory_order_acquire);
-            if (packed != PACKED_NULL)
-                break;
-            order++;
-        }
-
-        if (packed == PACKED_NULL)
-            return nullptr;
-
-        uint32_t idx = unpack_index(packed);
-        uint64_t next = links_[idx].load(std::memory_order_acquire);
-
-        if (!free_lists_[order].compare_exchange_weak(packed, next,
-                std::memory_order_acquire, std::memory_order_relaxed))
-        {
-            continue;
-        }
-
-        void* commit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
-        if (woomem_os_commit_memory(commit_addr, commit_size) != 0)
-        {
-            uint64_t head;
-            do
-            {
-                head = free_lists_[order].load(std::memory_order_acquire);
-                links_[idx].store(head, std::memory_order_relaxed);
-            } while (!free_lists_[order].compare_exchange_weak(head,
-                    pack(idx, unpack_counter(head) + 1),
-                    std::memory_order_release, std::memory_order_relaxed));
-            return nullptr;
-        }
-
-        while (order > required_order)
-        {
-            order--;
-            uint32_t buddy = idx | static_cast<uint32_t>(size_t(1) << order);
-
-            state_[buddy].store(static_cast<uint8_t>(order << STATE_ORDER_SHIFT),
-                std::memory_order_release);
-
-            uint64_t head;
-            do
-            {
-                head = free_lists_[order].load(std::memory_order_acquire);
-                links_[buddy].store(head, std::memory_order_relaxed);
-            } while (!free_lists_[order].compare_exchange_weak(head,
-                    pack(buddy, unpack_counter(head) + 1),
-                    std::memory_order_release, std::memory_order_relaxed));
-        }
-
-        uint8_t alloc_state = static_cast<uint8_t>((required_order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
-        for (size_t j = 0; j < block_pages; j++)
-            state_[idx + j].store(alloc_state, std::memory_order_release);
-
-        return index_to_page(idx);
-    }
+    if (pages_)
+        woomem_os_release_memory(pages_, total_pages_ * Page::NORMAL_PAGE_SIZE);
+    delete[] page_state_;
+    delete[] free_heads_;
+    delete[] free_next_;
 }
 
 Page* Chunk::allocate_page()
 {
-    return allocate_block(0);
+    if (max_order_ < 0) return nullptr;
+    spinlock_.lock();
+    size_t idx = alloc_block_(0);
+    spinlock_.unlock();
+    if (idx == SIZE_MAX) return nullptr;
+    return &pages_[idx];
 }
 
 Page* Chunk::allocate_huge_page(size_t size)
 {
-    if (size == 0)
-        return nullptr;
+    if (size == 0 || max_order_ < 0) return nullptr;
 
-    size_t pages = (size + Page::NORMAL_PAGE_SIZE - 1) / Page::NORMAL_PAGE_SIZE;
-    pages = round_up_power_of_2(pages);
-    size_t order = ilog2(pages);
-    return allocate_block(order);
+    size_t need_pages = (size + Page::NORMAL_PAGE_SIZE - 1) / Page::NORMAL_PAGE_SIZE;
+    int order = ceil_log2(need_pages);
+    if (order > max_order_) return nullptr;
+
+    spinlock_.lock();
+    size_t idx = alloc_block_(order);
+    spinlock_.unlock();
+
+    if (idx == SIZE_MAX) return nullptr;
+    return &pages_[idx];
 }
 
 void Chunk::free_page(Page* page)
 {
-    if (!base_ || !page)
-        return;
+    if (!page || !pages_) return;
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    uintptr_t base = (uintptr_t)pages_;
+    uintptr_t addr = (uintptr_t)page;
+    uintptr_t end  = base + (uintptr_t)total_pages_ * Page::NORMAL_PAGE_SIZE;
 
-    size_t idx = page_to_index(page);
-    if (idx >= total_pages_)
-        return;
+    spinlock_.lock();
 
-    uint8_t st = state_[idx].load(std::memory_order_acquire);
-
-    if (!(st & STATE_ALLOCATED))
-        return;
-
-    size_t order = st >> STATE_ORDER_SHIFT;
-    size_t block_pages = static_cast<size_t>(1) << order;
-    idx = idx & ~(block_pages - 1);
-
-    uint8_t expected = static_cast<uint8_t>((order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
-    if (!state_[idx].compare_exchange_strong(expected, 0,
-            std::memory_order_acquire, std::memory_order_relaxed))
+    if (addr < base || addr >= end)
     {
+        spinlock_.unlock();
         return;
     }
 
-    for (size_t j = 1; j < block_pages; j++)
-        state_[idx + j].store(0, std::memory_order_release);
+    size_t idx = (addr - base) / Page::NORMAL_PAGE_SIZE;
+    uint16_t state = page_state_[idx];
 
-    size_t decommit_size = block_pages * Page::NORMAL_PAGE_SIZE;
-    void* decommit_addr = static_cast<char*>(base_) + idx * Page::NORMAL_PAGE_SIZE;
-    woomem_os_decommit_memory(decommit_addr, decommit_size);
-
-    state_[idx].store(static_cast<uint8_t>(order << STATE_ORDER_SHIFT),
-        std::memory_order_release);
-
-    uint64_t head;
-    do
+    if (!(state & FLAG_ALLOCATED))
     {
-        head = free_lists_[order].load(std::memory_order_acquire);
-        links_[idx].store(head, std::memory_order_relaxed);
-    } while (!free_lists_[order].compare_exchange_weak(head,
-            pack(static_cast<uint32_t>(idx), unpack_counter(head) + 1),
-            std::memory_order_release, std::memory_order_relaxed));
-}
+        spinlock_.unlock();
+        return;
+    }
 
-Page* Chunk::validate(void* ptr)
-{
-    if (!base_ || !ptr)
-        return nullptr;
+    size_t head_idx;
+    int order;
+    if (state & FLAG_IS_HEAD)
+    {
+        head_idx = idx;
+        order = (int)(state & MASK_VALUE);
+    }
+    else
+    {
+        size_t back_off = state & MASK_VALUE;
+        head_idx = idx - back_off;
+        order = (int)(page_state_[head_idx] & MASK_VALUE);
+    }
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    free_block_(head_idx, order);
 
-    ptrdiff_t diff = static_cast<char*>(ptr) - static_cast<char*>(base_);
-    if (diff < 0 || static_cast<size_t>(diff) >= reserved_size_)
-        return nullptr;
-
-    size_t idx = addr_to_index(ptr);
-
-    uint8_t st = state_[idx].load(std::memory_order_acquire);
-    if (!(st & STATE_ALLOCATED))
-        return nullptr;
-
-    size_t order = st >> STATE_ORDER_SHIFT;
-    size_t block_pages = static_cast<size_t>(1) << order;
-    size_t start_idx = idx & ~(block_pages - 1);
-
-    return index_to_page(start_idx);
+    spinlock_.unlock();
 }
 
 void Chunk::defragment()
 {
-    if (!base_)
-        return;
+}
 
-    for (size_t order = 0; order < max_order_; order++)
+Page* Chunk::validate(void* ptr)
+{
+    if (!ptr || !pages_) return nullptr;
+
+    uintptr_t base = (uintptr_t)pages_;
+    uintptr_t addr = (uintptr_t)ptr;
+    uintptr_t end  = base + (uintptr_t)total_pages_ * Page::NORMAL_PAGE_SIZE;
+
+    spinlock_.lock();
+
+    if (addr < base || addr >= end)
     {
-        size_t stride = static_cast<size_t>(1) << (order + 1);
-        for (size_t i = 0; i < total_pages_; i += stride)
-        {
-            uint32_t idx = static_cast<uint32_t>(i);
-            uint32_t buddy = idx | static_cast<uint32_t>(size_t(1) << order);
-            if (buddy >= total_pages_)
-                continue;
-
-            uint8_t st_a = state_[idx].load(std::memory_order_relaxed);
-            if (st_a & STATE_ALLOCATED)
-                continue;
-            if ((st_a >> STATE_ORDER_SHIFT) != order)
-                continue;
-
-            uint8_t st_b = state_[buddy].load(std::memory_order_relaxed);
-            if (st_b & STATE_ALLOCATED)
-                continue;
-            if ((st_b >> STATE_ORDER_SHIFT) != order)
-                continue;
-
-            if (idx != (idx & ~(stride - 1)))
-                continue;
-
-            remove_from_free_list_defrag(order, idx);
-            remove_from_free_list_defrag(order, buddy);
-
-            uint32_t merged_idx = (buddy < idx) ? buddy : idx;
-            size_t new_order = order + 1;
-
-            state_[merged_idx].store(
-                static_cast<uint8_t>(new_order << STATE_ORDER_SHIFT),
-                std::memory_order_relaxed);
-
-            uint64_t head = free_lists_[new_order].load(std::memory_order_relaxed);
-            links_[merged_idx].store(head, std::memory_order_relaxed);
-            uint64_t new_packed = pack(merged_idx, unpack_counter(head) + 1);
-            free_lists_[new_order].store(new_packed, std::memory_order_relaxed);
-        }
+        spinlock_.unlock();
+        return nullptr;
     }
+
+    size_t idx = (addr - base) / Page::NORMAL_PAGE_SIZE;
+    uint16_t state = page_state_[idx];
+
+    if (!(state & FLAG_ALLOCATED))
+    {
+        spinlock_.unlock();
+        return nullptr;
+    }
+
+    Page* result;
+    if (state & FLAG_IS_HEAD)
+    {
+        result = &pages_[idx];
+    }
+    else
+    {
+        size_t back_off = state & MASK_VALUE;
+        result = &pages_[idx - back_off];
+    }
+
+    spinlock_.unlock();
+    return result;
+}
+
+size_t Chunk::alloc_block_(int order)
+{
+    int o = order;
+    while (o <= max_order_ && free_heads_[o] == SIZE_MAX)
+        o++;
+    if (o > max_order_) return SIZE_MAX;
+
+    size_t idx = free_heads_[o];
+    free_heads_[o] = free_next_[idx];
+    free_next_[idx] = SIZE_MAX;
+
+    while (o > order)
+    {
+        o--;
+        size_t buddy = idx + ((size_t)1 << o);
+        size_t buddy_size = (size_t)1 << o;
+
+        free_next_[buddy] = free_heads_[o];
+        free_heads_[o] = buddy;
+
+        page_state_[buddy] = FLAG_IS_HEAD | (uint16_t)o;
+        for (size_t i = 1; i < buddy_size; i++)
+            page_state_[buddy + i] = 0;
+    }
+
+    size_t block_size = (size_t)1 << order;
+    page_state_[idx] = FLAG_ALLOCATED | FLAG_IS_HEAD | (uint16_t)order;
+    for (size_t i = 1; i < block_size; i++)
+        page_state_[idx + i] = FLAG_ALLOCATED | (uint16_t)i;
+
+    return idx;
+}
+
+void Chunk::free_block_(size_t idx, int order)
+{
+    size_t block_size = (size_t)1 << order;
+
+    page_state_[idx] = FLAG_IS_HEAD | (uint16_t)order;
+    for (size_t i = 1; i < block_size; i++)
+        page_state_[idx + i] = 0;
+
+    while (order < max_order_)
+    {
+        size_t buddy = buddy_of_(idx, order);
+        if (buddy >= total_pages_) break;
+
+        uint16_t buddy_state = page_state_[buddy];
+        if (buddy_state & FLAG_ALLOCATED) break;
+        if (!(buddy_state & FLAG_IS_HEAD)) break;
+        if ((buddy_state & MASK_VALUE) != (uint16_t)order) break;
+
+        size_t prev = SIZE_MAX;
+        size_t curr = free_heads_[order];
+        while (curr != SIZE_MAX)
+        {
+            if (curr == buddy)
+            {
+                if (prev == SIZE_MAX)
+                    free_heads_[order] = free_next_[buddy];
+                else
+                    free_next_[prev] = free_next_[buddy];
+                break;
+            }
+            prev = curr;
+            curr = free_next_[curr];
+        }
+        free_next_[buddy] = SIZE_MAX;
+
+        idx = (idx < buddy) ? idx : buddy;
+        order++;
+        block_size <<= 1;
+
+        page_state_[idx] = FLAG_IS_HEAD | (uint16_t)order;
+        for (size_t i = 1; i < block_size; i++)
+            page_state_[idx + i] = 0;
+    }
+
+    free_next_[idx] = free_heads_[order];
+    free_heads_[order] = idx;
+}
+
+size_t Chunk::buddy_of_(size_t idx, int order) const
+{
+    return idx ^ ((size_t)1 << order);
 }
 
 }
