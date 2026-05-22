@@ -1,26 +1,13 @@
-#pragma once
-
 #include "woomem.h"
+
 #include "woomem_page.hpp"
 
 #include <atomic>
-#include <cstddef>
 #include <cstdint>
-
-#ifdef _MSC_VER
-#include <intrin.h>
-#endif
+#include <mutex>
 
 namespace woomem
 {
-    class SpinLock
-    {
-        std::atomic<uint32_t> flag_{0};
-    public:
-        void lock() noexcept;
-        void unlock() noexcept;
-    };
-
     class Chunk
     {
     public:
@@ -35,30 +22,39 @@ namespace woomem
         Page* allocate_page();
         Page* allocate_huge_page(size_t size);
         void free_page(Page* page);
-        void defragment();
 
         Page* validate(void* ptr);
 
+        void defragment();
+
     private:
-        static size_t round_up_power_of_two(size_t n);
-        static int ceil_log2(size_t n);
+        static constexpr uint32_t INDEX_NULL    = UINT32_MAX;
+        static constexpr uint64_t PACKED_NULL   = UINT64_MAX;
+        static constexpr uint8_t  STATE_ALLOCATED    = 0x01;
+        static constexpr uint8_t  STATE_ORDER_SHIFT  = 1;
 
-        size_t alloc_block_(int order);
-        void free_block_(size_t idx, int order);
-        size_t buddy_of_(size_t idx, int order) const;
+        static size_t round_up_power_of_2(size_t v);
+        static size_t ilog2(size_t v);
 
-        static constexpr uint16_t FLAG_ALLOCATED = 0x8000;
-        static constexpr uint16_t FLAG_IS_HEAD   = 0x4000;
-        static constexpr uint16_t MASK_VALUE     = 0x3FFF;
+        static uint64_t pack(uint32_t index, uint32_t counter);
+        static uint32_t unpack_index(uint64_t packed);
+        static uint32_t unpack_counter(uint64_t packed);
 
-        Page*     pages_        = nullptr;
-        size_t    total_pages_  = 0;
-        int       max_order_    = -1;
+        size_t page_to_index(Page* page) const;
+        Page* index_to_page(size_t idx) const;
+        size_t addr_to_index(void* ptr) const;
 
-        uint16_t* page_state_   = nullptr;
-        size_t*   free_heads_   = nullptr;
-        size_t*   free_next_    = nullptr;
+        Page* allocate_block(size_t order);
+        void remove_from_free_list_defrag(size_t order, uint32_t target);
 
-        SpinLock spinlock_;
+        void* base_;
+        size_t reserved_size_;
+        size_t total_pages_;
+        size_t max_order_;
+
+        std::atomic<uint8_t>*  state_;
+        std::atomic<uint64_t>* links_;
+        std::atomic<uint64_t>* free_lists_;
+        std::mutex              mutex_;
     };
 }
