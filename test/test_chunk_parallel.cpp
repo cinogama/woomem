@@ -195,15 +195,18 @@ TEST(producer_consumer_pattern)
                 spin_yield();
 
             queue[pos % kQueueSize].store(p, std::memory_order_release);
-            produced.fetch_add(1, std::memory_order_relaxed);
+            produced.fetch_add(1, std::memory_order_release);
         }
         producers_done.store(true, std::memory_order_release);
     };
 
     auto consumer = [&]()
     {
-        while (consumed.load(std::memory_order_relaxed) < kTotalItems)
+        while (true)
         {
+            if (consumed.load(std::memory_order_relaxed) >= kTotalItems)
+                break;
+
             if (read_pos.load(std::memory_order_acquire) >= write_pos.load(std::memory_order_acquire))
             {
                 if (producers_done.load(std::memory_order_acquire))
@@ -213,20 +216,23 @@ TEST(producer_consumer_pattern)
             }
 
             int pos = read_pos.fetch_add(1, std::memory_order_acq_rel);
-            if (pos >= produced.load(std::memory_order_acquire))
+
+            bool slot_ready = false;
+            while (true)
             {
-                read_pos.fetch_sub(1, std::memory_order_relaxed);
+                if (pos < produced.load(std::memory_order_acquire))
+                {
+                    slot_ready = true;
+                    break;
+                }
+                if (producers_done.load(std::memory_order_acquire))
+                    break;
                 spin_yield();
-                continue;
             }
+            if (!slot_ready)
+                break;
 
             Page* p = queue[pos % kQueueSize].load(std::memory_order_acquire);
-            if (!p)
-            {
-                read_pos.fetch_sub(1, std::memory_order_relaxed);
-                continue;
-            }
-
             CHECK_NE(p, nullptr);
             chunk.free_page(p);
             consumed.fetch_add(1, std::memory_order_relaxed);
