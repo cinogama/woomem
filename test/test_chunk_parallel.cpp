@@ -12,6 +12,7 @@
 #include <set>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 
 #ifdef _MSC_VER
 #define _CRTDBG_MAP_ALLOC
@@ -177,6 +178,11 @@ TEST(producer_consumer_pattern)
     std::atomic<int> consumed{0};
     std::atomic<bool> producers_done{false};
 
+    std::atomic_flag spinxa;
+    spinxa.clear();
+
+    std::unordered_map<Page*, bool> allocated_page;
+
     auto producer = [&]()
     {
         while (produced.load(std::memory_order_relaxed) < kTotalItems)
@@ -189,6 +195,13 @@ TEST(producer_consumer_pattern)
             }
 
             CHECK_EQ(chunk.validate(p), p);
+
+            while (spinxa.test_and_set());
+            if (chunk.validate(p) != p)
+                abort();
+
+            allocated_page[p] = true;
+            spinxa.clear();
 
             int pos = write_pos.fetch_add(1, std::memory_order_acq_rel);
             while (pos - read_pos.load(std::memory_order_acquire) >= kQueueSize)
@@ -234,6 +247,16 @@ TEST(producer_consumer_pattern)
 
             Page* p = queue[pos % kQueueSize].load(std::memory_order_acquire);
             CHECK_NE(p, nullptr);
+
+            while (spinxa.test_and_set());
+
+            auto& flag = allocated_page.at(p);
+            if (!flag)
+                abort();
+
+            flag = false;
+            spinxa.clear();
+
             chunk.free_page(p);
             consumed.fetch_add(1, std::memory_order_relaxed);
         }
@@ -909,7 +932,8 @@ int test_chunk_parallel_main(void)
 
     RUN_TEST(massive_parallel_alloc_free);
     RUN_TEST(multi_chunk_parallel_isolated);
-    RUN_TEST(producer_consumer_pattern);
+    for (size_t i = 0;; ++i)
+        RUN_TEST(producer_consumer_pattern);
     RUN_TEST(mixed_order_concurrent);
     RUN_TEST(validate_under_pressure);
     RUN_TEST(near_exhaustion_thrash);
