@@ -155,6 +155,8 @@ Page* Chunk::allocate_block(size_t required_order)
     if (!base_ || required_order > max_order_)
         return nullptr;
 
+    std::lock_guard<std::mutex> lock(mutex_);
+
     size_t block_pages = static_cast<size_t>(1) << required_order;
     size_t commit_size = block_pages * Page::NORMAL_PAGE_SIZE;
 
@@ -243,6 +245,8 @@ void Chunk::free_page(Page* page)
 {
     if (!base_ || !page)
         return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
 
     size_t idx = page_to_index(page);
     if (idx >= total_pages_)

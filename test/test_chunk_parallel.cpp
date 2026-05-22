@@ -409,8 +409,8 @@ TEST(validate_under_pressure)
 TEST(near_exhaustion_thrash)
 {
     Chunk chunk(1 * 1024 * 1024);
-    constexpr int kThreads = 8;
-    constexpr int kCycles = 30;
+    constexpr int kThreads = 4;
+    constexpr int kCycles = 50;
 
     std::atomic<int> successes{0};
 

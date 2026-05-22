@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 
 namespace woomem
 {
@@ -54,5 +55,6 @@ namespace woomem
         std::atomic<uint8_t>*  state_;
         std::atomic<uint64_t>* links_;
         std::atomic<uint64_t>* free_lists_;
+        std::mutex              mutex_;
     };
 }
