@@ -410,7 +410,7 @@ TEST(near_exhaustion_thrash)
 {
     Chunk chunk(1 * 1024 * 1024);
     constexpr int kThreads = 4;
-    constexpr int kCycles = 50;
+    constexpr int kCycles = 100;
 
     std::atomic<int> successes{0};
 

@@ -293,6 +293,8 @@ Page* Chunk::validate(void* ptr)
     if (!base_ || !ptr)
         return nullptr;
 
+    std::lock_guard<std::mutex> lock(mutex_);
+
     ptrdiff_t diff = static_cast<char*>(ptr) - static_cast<char*>(base_);
     if (diff < 0 || static_cast<size_t>(diff) >= reserved_size_)
         return nullptr;
