@@ -30,8 +30,9 @@ namespace woomem
     private:
         static constexpr uint32_t INDEX_NULL    = UINT32_MAX;
         static constexpr uint64_t PACKED_NULL   = UINT64_MAX;
-        static constexpr uint8_t  STATE_ALLOCATED    = 0x01;
-        static constexpr uint8_t  STATE_ORDER_SHIFT  = 1;
+        static constexpr uint8_t  STATE_ALLOCATED     = 0x01;
+        static constexpr uint8_t  STATE_ORDER_SHIFT   = 1;
+        static constexpr uint8_t  STATE_CONTINUATION  = 0xFF;
 
         static size_t round_up_power_of_2(size_t v);
         static size_t ilog2(size_t v);

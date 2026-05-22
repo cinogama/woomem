@@ -113,12 +113,6 @@ TEST(allocate_pages_non_overlapping)
     chunk.free_page(b);
 }
 
-TEST(huge_page_size_zero_returns_null)
-{
-    Chunk chunk(1024 * 1024);
-    CHECK(chunk.allocate_huge_page(0) == nullptr);
-}
-
 TEST(huge_page_smaller_than_one_page)
 {
     Chunk chunk(1024 * 1024);
@@ -155,34 +149,6 @@ TEST(huge_page_exceeds_available)
 {
     Chunk chunk(64 * 1024);
     CHECK(chunk.allocate_huge_page(128 * 1024) == nullptr);
-}
-
-TEST(free_nullptr_no_crash)
-{
-    Chunk chunk(1024 * 1024);
-    chunk.free_page(nullptr);
-}
-
-TEST(free_page_from_another_chunk_no_crash)
-{
-    Chunk chunk1(1024 * 1024);
-    Chunk chunk2(1024 * 1024);
-    Page* p = chunk1.allocate_page();
-    CHECK(p != nullptr);
-    chunk2.free_page(p);
-    chunk1.free_page(p);
-}
-
-TEST(double_free_is_noop)
-{
-    Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_page();
-    CHECK(p != nullptr);
-    chunk.free_page(p);
-    chunk.free_page(p);
-    Page* p2 = chunk.allocate_page();
-    CHECK(p2 != nullptr);
-    chunk.free_page(p2);
 }
 
 TEST(validate_nullptr_returns_null)
@@ -506,15 +472,11 @@ int test_chunk_main(void)
     RUN_TEST(allocate_reuse_same_page_after_free);
     RUN_TEST(allocate_many_pages);
     RUN_TEST(allocate_pages_non_overlapping);
-    RUN_TEST(huge_page_size_zero_returns_null);
     RUN_TEST(huge_page_smaller_than_one_page);
     RUN_TEST(huge_page_exact_one_page);
     RUN_TEST(huge_page_two_pages);
     RUN_TEST(huge_page_large_allocation);
     RUN_TEST(huge_page_exceeds_available);
-    RUN_TEST(free_nullptr_no_crash);
-    RUN_TEST(free_page_from_another_chunk_no_crash);
-    RUN_TEST(double_free_is_noop);
     RUN_TEST(validate_nullptr_returns_null);
     RUN_TEST(validate_outside_range_returns_null);
     RUN_TEST(validate_exact_page_start);

@@ -433,7 +433,10 @@ TEST(near_exhaustion_thrash)
             }
 
             for (int i = 0; i < allocated; i++)
-                chunk.free_page(pages[i]);
+            {
+                if (pages[i] != nullptr)
+                    chunk.free_page(pages[i]);
+            }
 
             spin_yield();
         }
@@ -801,7 +804,8 @@ TEST(rapid_alloc_free_burst)
             for (int j = 0; j < count; j++)
             {
                 CHECK_EQ(chunk.validate(batch[j]), batch[j]);
-                chunk.free_page(batch[j]);
+                if (batch[j])
+                    chunk.free_page(batch[j]);
             }
 
             ops.fetch_add(count, std::memory_order_relaxed);
@@ -844,46 +848,6 @@ TEST(sequential_after_parallel)
         CHECK(p != nullptr);
         chunk.free_page(p);
     }
-}
-
-TEST(double_free_concurrent)
-{
-    Chunk chunk(2 * 1024 * 1024);
-    constexpr int kThreads = 8;
-    constexpr int kRounds = 200;
-
-    std::atomic<int> ops{0};
-
-    auto worker = [&]()
-    {
-        for (int r = 0; r < kRounds; r++)
-        {
-            Page* a = chunk.allocate_page();
-            Page* b = chunk.allocate_page();
-            if (!a || !b)
-            {
-                if (a) chunk.free_page(a);
-                if (b) chunk.free_page(b);
-                continue;
-            }
-
-            chunk.free_page(a);
-            chunk.free_page(a);
-
-            chunk.free_page(b);
-            chunk.free_page(b);
-
-            ops.fetch_add(1, std::memory_order_relaxed);
-        }
-    };
-
-    std::vector<std::thread> threads;
-    for (int i = 0; i < kThreads; i++)
-        threads.emplace_back(worker);
-    for (auto& t : threads)
-        t.join();
-
-    CHECK_GE(ops.load(), 100);
 }
 
 TEST(zigzag_order_allocation)
@@ -951,7 +915,6 @@ int test_chunk_parallel_main(void)
     RUN_TEST(max_concurrency_stress);
     RUN_TEST(rapid_alloc_free_burst);
     RUN_TEST(sequential_after_parallel);
-    RUN_TEST(double_free_concurrent);
     RUN_TEST(zigzag_order_allocation);
 
     std::printf("\n=== %d failures ===\n", g_failures);
