@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -171,91 +172,94 @@ TEST(producer_consumer_pattern)
     constexpr int kQueueSize = 256;
     constexpr int kTotalItems = 10000;
 
-    std::atomic<Page*> queue[kQueueSize] = {};
-    std::atomic<int> write_pos{0};
-    std::atomic<int> read_pos{0};
+    struct BoundedQueue {
+        std::vector<Page*> buf;
+        int head = 0, tail = 0, count = 0, cap;
+        bool closed = false;
+        std::mutex mtx;
+        std::condition_variable not_empty;
+        std::condition_variable not_full;
+
+        BoundedQueue(int c) : buf(c), cap(c) {}
+
+        void push(Page* p)
+        {
+            std::unique_lock lock(mtx);
+            not_full.wait(lock, [&]{ return count < cap; });
+            buf[tail] = p;
+            tail = (tail + 1) % cap;
+            count++;
+            not_empty.notify_one();
+        }
+
+        bool pop(Page*& out)
+        {
+            std::unique_lock lock(mtx);
+            not_empty.wait(lock, [&]{ return count > 0 || closed; });
+            if (count == 0) return false;
+            out = buf[head];
+            head = (head + 1) % cap;
+            count--;
+            not_full.notify_one();
+            return true;
+        }
+
+        void close()
+        {
+            std::lock_guard lock(mtx);
+            closed = true;
+            not_empty.notify_all();
+        }
+    };
+
+    BoundedQueue queue(kQueueSize);
     std::atomic<int> produced{0};
     std::atomic<int> consumed{0};
-    std::atomic<bool> producers_done{false};
+    std::atomic<int> active_producers{kProducers};
 
-    std::atomic_flag spinxa;
-    spinxa.clear();
-
+    std::mutex alloc_mtx;
     std::unordered_map<Page*, bool> allocated_page;
 
     auto producer = [&]()
     {
-        while (produced.load(std::memory_order_relaxed) < kTotalItems)
+        while (true)
         {
-            Page* p = chunk.allocate_page();
-            if (!p)
+            int old = produced.fetch_add(1, std::memory_order_relaxed);
+            if (old >= kTotalItems) break;
+
+            Page* p = nullptr;
+            while (!p)
             {
-                spin_yield();
-                continue;
+                p = chunk.allocate_page();
+                if (!p) spin_yield();
             }
 
             CHECK_EQ(chunk.validate(p), p);
 
-            while (spinxa.test_and_set());
-            if (chunk.validate(p) != p)
-                abort();
+            {
+                std::lock_guard lock(alloc_mtx);
+                allocated_page[p] = true;
+            }
 
-            allocated_page[p] = true;
-            spinxa.clear();
-
-            int pos = write_pos.fetch_add(1, std::memory_order_acq_rel);
-            while (pos - read_pos.load(std::memory_order_acquire) >= kQueueSize)
-                spin_yield();
-
-            queue[pos % kQueueSize].store(p, std::memory_order_release);
-            produced.fetch_add(1, std::memory_order_release);
+            queue.push(p);
         }
-        producers_done.store(true, std::memory_order_release);
+        if (active_producers.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            queue.close();
     };
 
     auto consumer = [&]()
     {
-        while (true)
+        Page* p;
+        while (queue.pop(p))
         {
-            if (consumed.load(std::memory_order_relaxed) >= kTotalItems)
-                break;
-
-            if (read_pos.load(std::memory_order_acquire) >= write_pos.load(std::memory_order_acquire))
-            {
-                if (producers_done.load(std::memory_order_acquire))
-                    break;
-                spin_yield();
-                continue;
-            }
-
-            int pos = read_pos.fetch_add(1, std::memory_order_acq_rel);
-
-            bool slot_ready = false;
-            while (true)
-            {
-                if (pos < produced.load(std::memory_order_acquire))
-                {
-                    slot_ready = true;
-                    break;
-                }
-                if (producers_done.load(std::memory_order_acquire))
-                    break;
-                spin_yield();
-            }
-            if (!slot_ready)
-                break;
-
-            Page* p = queue[pos % kQueueSize].load(std::memory_order_acquire);
             CHECK_NE(p, nullptr);
 
-            while (spinxa.test_and_set());
-
-            auto& flag = allocated_page.at(p);
-            if (!flag)
-                abort();
-
-            flag = false;
-            spinxa.clear();
+            {
+                std::lock_guard lock(alloc_mtx);
+                auto& flag = allocated_page.at(p);
+                CHECK(flag);
+                flag = false;
+            }
 
             chunk.free_page(p);
             consumed.fetch_add(1, std::memory_order_relaxed);
@@ -270,8 +274,8 @@ TEST(producer_consumer_pattern)
     for (auto& t : threads)
         t.join();
 
-    CHECK_GE(consumed.load(), kTotalItems / 2);
-    std::printf("    produced=%d consumed=%d\n", produced.load(), consumed.load());
+    CHECK_EQ(consumed.load(), kTotalItems);
+    std::printf("    produced=%d consumed=%d\n", kTotalItems, consumed.load());
 }
 
 TEST(mixed_order_concurrent)
@@ -932,7 +936,7 @@ int test_chunk_parallel_main(void)
 
     RUN_TEST(massive_parallel_alloc_free);
     RUN_TEST(multi_chunk_parallel_isolated);
-    for (size_t i = 0;; ++i)
+    for (size_t i = 0; i < 50; ++i)
         RUN_TEST(producer_consumer_pattern);
     RUN_TEST(mixed_order_concurrent);
     RUN_TEST(validate_under_pressure);
