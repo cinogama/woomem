@@ -12,7 +12,7 @@ namespace woomem
 
         constexpr size_t UNIT_PAGE_HEAD_SIZE = sizeof(PageHead) + sizeof(PageUnitAlloc);
 
-        page_alloc_head->__reserved__ = static_cast<uint32_t>(group_type);
+        page_alloc_head->m_run_out.store(0, std::memory_order::memory_order_relaxed);
         page_alloc_head->m_freed_unit_offset.store(0, std::memory_order::memory_order_relaxed);
         page_alloc_head->m_next_allocate_unit_offset = UNIT_PAGE_HEAD_SIZE;
 
@@ -34,7 +34,6 @@ namespace woomem
             unit->m_next_free_unit_offset = (i + 1 < unit_count)
                 ? static_cast<uint16_t>(unit_offset + group_unit_size_include_unit_head)
                 : 0;
-            unit->__reserved__ = 0;
             unit->m_age = 0;
             unit->m_timing = 0;
             unit->m_life.store(UnitLife::RELEASED, std::memory_order::memory_order_relaxed);

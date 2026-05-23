@@ -87,7 +87,8 @@ namespace woomem
     {
         uint16_t                m_next_allocate_unit_offset;
         std::atomic_uint16_t    m_freed_unit_offset;
-        uint32_t                __reserved__;
+        std::atomic_uint8_t     m_run_out;
+        char                    __reserved__[3];
     };
     static_assert(sizeof(PageUnitAlloc) == 8);
 
@@ -102,7 +103,7 @@ namespace woomem
     struct UnitHead
     {
         uint16_t            m_next_free_unit_offset;
-        uint16_t            __reserved__;
+        char                __reserved__[2];
         uint8_t             m_age;
         uint8_t             m_timing;
         std::atomic_uint8_t m_life;
@@ -118,10 +119,6 @@ namespace woomem
 
         PageUnitAlloc* const page_alloc_head = 
             reinterpret_cast<PageUnitAlloc*>(page + 1);
-        const UnitAllocGroup group_type = 
-            static_cast<UnitAllocGroup>(page_alloc_head->__reserved__);
-        const uint16_t unit_size_with_head = 
-            static_cast<uint16_t>(sizeof(UnitHead) + GROUP_SIZE_LOOKUP_TABLE[group_type]);
 
         uint16_t current_offset = page_alloc_head->m_next_allocate_unit_offset;
         do
@@ -140,9 +137,18 @@ namespace woomem
                 return allocating_unit + 1;
             }
 
-            current_offset = page_alloc_head->m_freed_unit_offset.exchange(0);
+            current_offset = page_alloc_head->m_freed_unit_offset.exchange(
+                0, 
+                std::memory_order::memory_order_acquire);
+
             if (current_offset == 0)
+            {
+                page_alloc_head->m_run_out.store(
+                    1, 
+                    std::memory_order::memory_order_relaxed);
+
                 return nullptr;
+            }
 
             page_alloc_head->m_next_allocate_unit_offset = current_offset;
 
