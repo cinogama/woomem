@@ -15,17 +15,41 @@ struct _woomem_GlobalContext
     _woomem_GlobalContext(size_t reserved_chunk_size)
         : m_chunk(reserved_chunk_size)
         , m_page_list{}
-    {
-    }
-    void _add_page_to_list(woomem::PageHead* page)
-    {
+    {}
 
+    void _add_page_into_chain(woomem::PageHead* page)
+    {
+        page->m_next_page = m_page_list.load(std::memory_order_relaxed);
+
+        do
+        {
+        } while (!m_page_list.compare_exchange_weak(
+            page->m_next_page,
+            page,
+            std::memory_order_release,
+            std::memory_order_relaxed));
+    }
+
+    woomem::PageHead* allocate_new_page()
+    {
+        woomem::PageHead* const page = m_chunk.allocate_page();
+        if (page != nullptr)
+        {
+            _add_page_into_chain(page);
+        }
+        return page;
+    }
+    woomem::PageHead* allocate_huge_page(size_t size)
+    {
+        woomem::PageHead* const huge_page = m_chunk.allocate_huge_page(size);
+        if (huge_page != nullptr)
+        {
+            _add_page_into_chain(huge_page);
+        }
+        return huge_page;
     }
 };
 static _woomem_GlobalContext* _s_ctx;
-
-
-
 
 void woomem_init(
     size_t reserved_chunk_size,

@@ -211,19 +211,25 @@ namespace woomem
 
     PageHead* Chunk::allocate_page()
     {
-        return allocate_block(0);
+        PageHead* page = allocate_block(0);
+        if (page != nullptr)
+            page->m_size_if_huge_page = 0;
+        return page;
     }
 
     PageHead* Chunk::allocate_huge_page(size_t size)
     {
         assert(base_ != nullptr && size != 0);
 
-        size_t required_pages =
+        const size_t required_pages =
             (size + PageHead::NORMAL_PAGE_SIZE - 1) /
             PageHead::NORMAL_PAGE_SIZE;
-        size_t order = ilog2(round_up_power_of_2(required_pages));
+        const size_t order = ilog2(round_up_power_of_2(required_pages));
 
-        return allocate_block(order);
+        PageHead* page = allocate_block(order);
+        if (page != nullptr)
+            page->m_size_if_huge_page = required_pages;
+        return page;
     }
 
     void Chunk::free_page(PageHead* page)
