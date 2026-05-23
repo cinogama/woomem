@@ -21,7 +21,14 @@ namespace woomem
             , m_cached_pages{}
         {}
         ~ThreadPageCollection()
-        {}
+        {
+            for (int i = 0; i < UnitAllocGroup::MAX_GROUP; ++i)
+            {
+                PageHead* page = m_cached_pages[i];
+                if (page != nullptr)
+                    m_global_page_collection->return_page(page, static_cast<UnitAllocGroup>(i));
+            }
+        }
 
         ThreadPageCollection(const ThreadPageCollection&) = delete;
         ThreadPageCollection& operator=(const ThreadPageCollection&) = delete;

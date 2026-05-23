@@ -49,5 +49,17 @@ namespace woomem
             }
             return page;
         }
+
+        void return_page(PageHead* page, UnitAllocGroup group)
+        {
+            PageHead* head = m_free_pages[group].load(std::memory_order_relaxed);
+            do
+            {
+                page->m_next_page = head;
+            } while (!m_free_pages[group].compare_exchange_weak(
+                head, page,
+                std::memory_order_release,
+                std::memory_order_relaxed));
+        }
     };
 }
