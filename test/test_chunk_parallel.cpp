@@ -45,7 +45,7 @@ static int g_failures = 0;
 #define CHECK_LE(a, b) CHECK((a) <= (b))
 #define CHECK_GE(a, b) CHECK((a) >= (b))
 
-static constexpr size_t kPageSize = Page::NORMAL_PAGE_SIZE;
+static constexpr size_t kPageSize = PageHead::NORMAL_PAGE_SIZE;
 
 static void spin_yield()
 {
@@ -73,11 +73,11 @@ TEST(massive_parallel_alloc_free)
         {
             if (coin(rng) == 0)
             {
-                Page* p = chunk.allocate_page();
+                PageHead* p = chunk.allocate_page();
                 if (p)
                 {
                     CHECK_NE(p, nullptr);
-                    Page* v = chunk.validate(p);
+                    PageHead* v = chunk.validate(p);
                     CHECK_EQ(v, p);
                     chunk.free_page(p);
                     total_ops.fetch_add(1, std::memory_order_relaxed);
@@ -85,8 +85,8 @@ TEST(massive_parallel_alloc_free)
             }
             else
             {
-                Page* a = chunk.allocate_page();
-                Page* b = chunk.allocate_page();
+                PageHead* a = chunk.allocate_page();
+                PageHead* b = chunk.allocate_page();
                 if (a && b)
                 {
                     CHECK_NE(a, b);
@@ -135,8 +135,8 @@ TEST(multi_chunk_parallel_isolated)
         Chunk& c = chunks[chunk_idx];
         for (int i = 0; i < kIters; i++)
         {
-            Page* a = c.allocate_page();
-            Page* b = c.allocate_page();
+            PageHead* a = c.allocate_page();
+            PageHead* b = c.allocate_page();
             if (a && b)
             {
                 CHECK_NE(a, b);
@@ -173,7 +173,7 @@ TEST(producer_consumer_pattern)
     constexpr int kTotalItems = 10000;
 
     struct BoundedQueue {
-        std::vector<Page*> buf;
+        std::vector<PageHead*> buf;
         int head = 0, tail = 0, count = 0, cap;
         bool closed = false;
         std::mutex mtx;
@@ -182,7 +182,7 @@ TEST(producer_consumer_pattern)
 
         BoundedQueue(int c) : buf(c), cap(c) {}
 
-        void push(Page* p)
+        void push(PageHead* p)
         {
             std::unique_lock lock(mtx);
             not_full.wait(lock, [&]{ return count < cap; });
@@ -192,7 +192,7 @@ TEST(producer_consumer_pattern)
             not_empty.notify_one();
         }
 
-        bool pop(Page*& out)
+        bool pop(PageHead*& out)
         {
             std::unique_lock lock(mtx);
             not_empty.wait(lock, [&]{ return count > 0 || closed; });
@@ -218,7 +218,7 @@ TEST(producer_consumer_pattern)
     std::atomic<int> active_producers{kProducers};
 
     std::mutex alloc_mtx;
-    std::unordered_map<Page*, bool> allocated_page;
+    std::unordered_map<PageHead*, bool> allocated_page;
 
     auto producer = [&]()
     {
@@ -227,7 +227,7 @@ TEST(producer_consumer_pattern)
             int old = produced.fetch_add(1, std::memory_order_relaxed);
             if (old >= kTotalItems) break;
 
-            Page* p = nullptr;
+            PageHead* p = nullptr;
             while (!p)
             {
                 p = chunk.allocate_page();
@@ -249,7 +249,7 @@ TEST(producer_consumer_pattern)
 
     auto consumer = [&]()
     {
-        Page* p;
+        PageHead* p;
         while (queue.pop(p))
         {
             CHECK_NE(p, nullptr);
@@ -294,7 +294,7 @@ TEST(mixed_order_concurrent)
         for (int i = 0; i < kIters; i++)
         {
             int choice = dist(rng);
-            Page* p = nullptr;
+            PageHead* p = nullptr;
 
             switch (choice)
             {
@@ -321,8 +321,8 @@ TEST(mixed_order_concurrent)
             case 3:
             case 4:
             {
-                Page* a = chunk.allocate_page();
-                Page* b = chunk.allocate_page();
+                PageHead* a = chunk.allocate_page();
+                PageHead* b = chunk.allocate_page();
                 if (a && b)
                 {
                     CHECK_NE(a, b);
@@ -376,7 +376,7 @@ TEST(validate_under_pressure)
 
         while (!stop.load(std::memory_order_relaxed))
         {
-            Page* p = nullptr;
+            PageHead* p = nullptr;
             if (coin(rng) == 0)
                 p = chunk.allocate_huge_page(kPageSize * 2);
             else
@@ -397,7 +397,7 @@ TEST(validate_under_pressure)
 
         while (!stop.load(std::memory_order_relaxed))
         {
-            Page* p = chunk.allocate_page();
+            PageHead* p = chunk.allocate_page();
             if (!p)
             {
                 spin_yield();
@@ -405,7 +405,7 @@ TEST(validate_under_pressure)
             }
 
             // Validate at page start — should always return p
-            Page* result = chunk.validate(p);
+            PageHead* result = chunk.validate(p);
             validate_ops.fetch_add(1, std::memory_order_relaxed);
             if (result != nullptr)
                 validate_ok.fetch_add(1, std::memory_order_relaxed);
@@ -451,7 +451,7 @@ TEST(near_exhaustion_thrash)
     {
         for (int cycle = 0; cycle < kCycles; cycle++)
         {
-            Page* pages[32];
+            PageHead* pages[32];
             int allocated = 0;
 
             for (int i = 0; i < 32; i++)
@@ -503,7 +503,7 @@ TEST(random_power2_allocations)
         {
             int order = order_dist(rng);
             size_t size = kPageSize * (static_cast<size_t>(1) << order);
-            Page* p = chunk.allocate_huge_page(size);
+            PageHead* p = chunk.allocate_huge_page(size);
 
             if (p)
             {
@@ -536,7 +536,7 @@ TEST(alloc_free_interleaved_stress)
     constexpr int kThreads = 12;
     constexpr int kIters = 1500;
 
-    struct Slot { std::atomic<Page*> page{nullptr}; };
+    struct Slot { std::atomic<PageHead*> page{nullptr}; };
     Slot slots[128];
     std::atomic<int> ops{0};
 
@@ -548,7 +548,7 @@ TEST(alloc_free_interleaved_stress)
         for (int i = 0; i < kIters; i++)
         {
             int slot = slot_dist(rng);
-            Page* old = slots[slot].page.exchange(nullptr, std::memory_order_acq_rel);
+            PageHead* old = slots[slot].page.exchange(nullptr, std::memory_order_acq_rel);
 
             if (old)
             {
@@ -557,11 +557,11 @@ TEST(alloc_free_interleaved_stress)
             }
             else
             {
-                Page* p = chunk.allocate_page();
+                PageHead* p = chunk.allocate_page();
                 if (p)
                 {
                     CHECK_EQ(chunk.validate(p), p);
-                    Page* expected = nullptr;
+                    PageHead* expected = nullptr;
                     if (slots[slot].page.compare_exchange_strong(expected, p,
                             std::memory_order_release, std::memory_order_relaxed))
                     {
@@ -577,7 +577,7 @@ TEST(alloc_free_interleaved_stress)
 
         for (int s = 0; s < 128; s++)
         {
-            Page* p = slots[s].page.exchange(nullptr, std::memory_order_acq_rel);
+            PageHead* p = slots[s].page.exchange(nullptr, std::memory_order_acq_rel);
             if (p)
                 chunk.free_page(p);
         }
@@ -605,7 +605,7 @@ TEST(no_double_alloc)
     {
         for (int i = 0; i < kIters; i++)
         {
-            Page* pages[3] = {nullptr, nullptr, nullptr};
+            PageHead* pages[3] = {nullptr, nullptr, nullptr};
             int count = 0;
 
             for (int j = 0; j < 3; j++)
@@ -671,7 +671,7 @@ TEST(huge_page_non_overlapping)
         {
             int order = ord_dist(rng);
             size_t sz = kPageSize * (static_cast<size_t>(1) << order);
-            Page* p = chunk.allocate_huge_page(sz);
+            PageHead* p = chunk.allocate_huge_page(sz);
 
             if (p)
             {
@@ -719,7 +719,7 @@ TEST(long_running_stress)
 
         while (!stop.load(std::memory_order_relaxed))
         {
-            Page* p = nullptr;
+            PageHead* p = nullptr;
             int c = coin(rng);
 
             if (c == 0)
@@ -784,8 +784,8 @@ TEST(max_concurrency_stress)
     {
         for (int i = 0; i < kIters; i++)
         {
-            Page* a = chunk.allocate_page();
-            Page* b = chunk.allocate_page();
+            PageHead* a = chunk.allocate_page();
+            PageHead* b = chunk.allocate_page();
             if (a && b)
             {
                 CHECK_NE(a, b);
@@ -821,7 +821,7 @@ TEST(rapid_alloc_free_burst)
 
     auto worker = [&]()
     {
-        std::vector<Page*> batch(50, nullptr);
+        std::vector<PageHead*> batch(50, nullptr);
 
         for (int burst = 0; burst < kBursts; burst++)
         {
@@ -859,7 +859,7 @@ TEST(sequential_after_parallel)
 {
     Chunk chunk(4 * 1024 * 1024);
 
-    Page* pages[128];
+    PageHead* pages[128];
     for (int i = 0; i < 128; i++)
     {
         pages[i] = chunk.allocate_page();
@@ -871,13 +871,13 @@ TEST(sequential_after_parallel)
         chunk.free_page(pages[i]);
 
     chunk.defragment();
-    Page* huge = chunk.allocate_huge_page(128 * kPageSize);
+    PageHead* huge = chunk.allocate_huge_page(128 * kPageSize);
     CHECK(huge != nullptr);
     chunk.free_page(huge);
 
     for (int i = 0; i < 64; i++)
     {
-        Page* p = chunk.allocate_page();
+        PageHead* p = chunk.allocate_page();
         CHECK(p != nullptr);
         chunk.free_page(p);
     }
@@ -895,12 +895,12 @@ TEST(zigzag_order_allocation)
     {
         for (int r = 0; r < kRounds; r++)
         {
-            Page* huge = chunk.allocate_huge_page(kPageSize * 8);
+            PageHead* huge = chunk.allocate_huge_page(kPageSize * 8);
             if (!huge) continue;
 
             CHECK_EQ(chunk.validate(huge), huge);
 
-            Page* small[4] = {};
+            PageHead* small[4] = {};
             for (int s = 0; s < 4; s++)
                 small[s] = chunk.allocate_page();
 

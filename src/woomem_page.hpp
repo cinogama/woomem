@@ -1,17 +1,13 @@
+#pragma once
+
 namespace woomem
 {
-    struct Page
+    struct PageHead
     {
         static constexpr size_t NORMAL_PAGE_SIZE = 32768;
+        // =================================================
 
-        char _reserved_[NORMAL_PAGE_SIZE];
-
-        Page() = default;
-        ~Page() = default;
-
-        Page(const Page&) = delete;
-        Page(Page&&) = delete;
-        Page& operator = (const Page&) = delete;
-        Page& operator = (Page&&) = delete;
+        PageHead*   m_next_page;
+        size_t      m_size_if_huge_page;
     };
 }

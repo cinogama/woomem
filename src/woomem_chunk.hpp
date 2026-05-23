@@ -1,3 +1,5 @@
+#pragma once
+
 #include "woomem.h"
 
 #include "woomem_page.hpp"
@@ -19,13 +21,16 @@ namespace woomem
         Chunk& operator = (const Chunk&) = delete;
         Chunk& operator = (Chunk&&) = delete;
 
-        Page* allocate_page();
-        Page* allocate_huge_page(size_t size);
-        void free_page(Page* page);
+        PageHead* allocate_page();
+        PageHead* allocate_huge_page(size_t size);
+        void free_page(PageHead* page);
 
-        Page* validate(void* ptr);
+        PageHead* validate(void* ptr);
 
         void defragment();
+
+        size_t get_total_size() const;
+        size_t get_total_page_count() const;
 
     private:
         static constexpr uint32_t INDEX_NULL    = UINT32_MAX;
@@ -41,11 +46,11 @@ namespace woomem
         static uint32_t unpack_index(uint64_t packed);
         static uint32_t unpack_counter(uint64_t packed);
 
-        size_t page_to_index(Page* page) const;
-        Page* index_to_page(size_t idx) const;
+        size_t page_to_index(PageHead* page) const;
+        PageHead* index_to_page(size_t idx) const;
         size_t addr_to_index(void* ptr) const;
 
-        Page* allocate_block(size_t order);
+        PageHead* allocate_block(size_t order);
         void remove_from_free_list_defrag(size_t order, uint32_t target);
 
         void* base_;

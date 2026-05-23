@@ -55,7 +55,7 @@ TEST(construct_exact_power_of_two_pages)
 TEST(allocate_single_page)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_page();
+    PageHead* p = chunk.allocate_page();
     CHECK(p != nullptr);
     chunk.free_page(p);
 }
@@ -63,7 +63,7 @@ TEST(allocate_single_page)
 TEST(allocate_exhaust_all_pages)
 {
     Chunk chunk(64 * 1024);
-    Page* pages[2];
+    PageHead* pages[2];
     for (int i = 0; i < 2; i++)
     {
         pages[i] = chunk.allocate_page();
@@ -77,11 +77,11 @@ TEST(allocate_exhaust_all_pages)
 TEST(allocate_reuse_same_page_after_free)
 {
     Chunk chunk(1024 * 1024);
-    Page* p1 = chunk.allocate_page();
+    PageHead* p1 = chunk.allocate_page();
     CHECK(p1 != nullptr);
     chunk.free_page(p1);
 
-    Page* p2 = chunk.allocate_page();
+    PageHead* p2 = chunk.allocate_page();
     CHECK(p2 != nullptr);
     CHECK_EQ(p1, p2);
     chunk.free_page(p2);
@@ -90,7 +90,7 @@ TEST(allocate_reuse_same_page_after_free)
 TEST(allocate_many_pages)
 {
     Chunk chunk(1024 * 1024);
-    Page* pages[32];
+    PageHead* pages[32];
     for (int i = 0; i < 32; i++)
     {
         pages[i] = chunk.allocate_page();
@@ -104,8 +104,8 @@ TEST(allocate_many_pages)
 TEST(allocate_pages_non_overlapping)
 {
     Chunk chunk(1024 * 1024);
-    Page* a = chunk.allocate_page();
-    Page* b = chunk.allocate_page();
+    PageHead* a = chunk.allocate_page();
+    PageHead* b = chunk.allocate_page();
     CHECK(a != nullptr);
     CHECK(b != nullptr);
     CHECK_NE(a, b);
@@ -116,7 +116,7 @@ TEST(allocate_pages_non_overlapping)
 TEST(huge_page_smaller_than_one_page)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_huge_page(100);
+    PageHead* p = chunk.allocate_huge_page(100);
     CHECK(p != nullptr);
     chunk.free_page(p);
 }
@@ -124,7 +124,7 @@ TEST(huge_page_smaller_than_one_page)
 TEST(huge_page_exact_one_page)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_huge_page(Page::NORMAL_PAGE_SIZE);
+    PageHead* p = chunk.allocate_huge_page(PageHead::NORMAL_PAGE_SIZE);
     CHECK(p != nullptr);
     chunk.free_page(p);
 }
@@ -132,7 +132,7 @@ TEST(huge_page_exact_one_page)
 TEST(huge_page_two_pages)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
+    PageHead* p = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p != nullptr);
     chunk.free_page(p);
 }
@@ -140,7 +140,7 @@ TEST(huge_page_two_pages)
 TEST(huge_page_large_allocation)
 {
     Chunk chunk(4 * 1024 * 1024);
-    Page* p = chunk.allocate_huge_page(2 * 1024 * 1024);
+    PageHead* p = chunk.allocate_huge_page(2 * 1024 * 1024);
     CHECK(p != nullptr);
     chunk.free_page(p);
 }
@@ -167,7 +167,7 @@ TEST(validate_outside_range_returns_null)
 TEST(validate_exact_page_start)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_page();
+    PageHead* p = chunk.allocate_page();
     CHECK(p != nullptr);
     CHECK_EQ(chunk.validate(p), p);
     chunk.free_page(p);
@@ -176,7 +176,7 @@ TEST(validate_exact_page_start)
 TEST(validate_interior_of_page)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_page();
+    PageHead* p = chunk.allocate_page();
     CHECK(p != nullptr);
     char* interior = reinterpret_cast<char*>(p) + 100;
     CHECK_EQ(chunk.validate(interior), p);
@@ -186,7 +186,7 @@ TEST(validate_interior_of_page)
 TEST(validate_freed_returns_null)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_page();
+    PageHead* p = chunk.allocate_page();
     CHECK(p != nullptr);
     chunk.free_page(p);
     CHECK(chunk.validate(p) == nullptr);
@@ -195,9 +195,9 @@ TEST(validate_freed_returns_null)
 TEST(validate_huge_page_interior)
 {
     Chunk chunk(1024 * 1024);
-    Page* p = chunk.allocate_huge_page(4 * Page::NORMAL_PAGE_SIZE);
+    PageHead* p = chunk.allocate_huge_page(4 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p != nullptr);
-    char* interior = reinterpret_cast<char*>(p) + 3 * Page::NORMAL_PAGE_SIZE + 10;
+    char* interior = reinterpret_cast<char*>(p) + 3 * PageHead::NORMAL_PAGE_SIZE + 10;
     CHECK_EQ(chunk.validate(interior), p);
     chunk.free_page(p);
 }
@@ -205,7 +205,7 @@ TEST(validate_huge_page_interior)
 TEST(buddy_coalesce_all_to_max_order)
 {
     Chunk chunk(1024 * 1024);
-    Page* pages[32];
+    PageHead* pages[32];
     for (int i = 0; i < 32; i++)
     {
         pages[i] = chunk.allocate_page();
@@ -214,7 +214,7 @@ TEST(buddy_coalesce_all_to_max_order)
     for (int i = 0; i < 32; i++)
         chunk.free_page(pages[i]);
     chunk.defragment();
-    Page* huge = chunk.allocate_huge_page(32 * Page::NORMAL_PAGE_SIZE);
+    PageHead* huge = chunk.allocate_huge_page(32 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(huge != nullptr);
     chunk.free_page(huge);
 }
@@ -222,14 +222,14 @@ TEST(buddy_coalesce_all_to_max_order)
 TEST(buddy_coalesce_to_order_1)
 {
     Chunk chunk(1024 * 1024);
-    Page* p0 = chunk.allocate_page();
-    Page* p1 = chunk.allocate_page();
+    PageHead* p0 = chunk.allocate_page();
+    PageHead* p1 = chunk.allocate_page();
     CHECK(p0 != nullptr);
     CHECK(p1 != nullptr);
     chunk.free_page(p0);
     chunk.free_page(p1);
     chunk.defragment();
-    Page* p2 = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
+    PageHead* p2 = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
     chunk.free_page(p2);
 }
@@ -237,14 +237,14 @@ TEST(buddy_coalesce_to_order_1)
 TEST(buddy_no_coalesce_when_still_allocated)
 {
     Chunk chunk(1024 * 1024);
-    Page* p0 = chunk.allocate_page();
-    Page* p1 = chunk.allocate_page();
+    PageHead* p0 = chunk.allocate_page();
+    PageHead* p1 = chunk.allocate_page();
     CHECK(p0 != nullptr);
     CHECK(p1 != nullptr);
-    CHECK_EQ(p1, reinterpret_cast<Page*>(reinterpret_cast<char*>(p0) + Page::NORMAL_PAGE_SIZE));
+    CHECK_EQ(p1, reinterpret_cast<PageHead*>(reinterpret_cast<char*>(p0) + PageHead::NORMAL_PAGE_SIZE));
     chunk.free_page(p1);
     chunk.defragment();
-    Page* p2 = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
+    PageHead* p2 = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
     CHECK_NE(p2, p0);
     chunk.free_page(p0);
@@ -255,8 +255,8 @@ TEST(multi_chunk_isolation)
 {
     Chunk chunk1(1024 * 1024);
     Chunk chunk2(1024 * 1024);
-    Page* p1 = chunk1.allocate_page();
-    Page* p2 = chunk2.allocate_page();
+    PageHead* p1 = chunk1.allocate_page();
+    PageHead* p2 = chunk2.allocate_page();
     CHECK(p1 != nullptr);
     CHECK(p2 != nullptr);
     CHECK_NE(p1, p2);
@@ -273,9 +273,9 @@ TEST(alloc_free_alloc_cycle)
     Chunk chunk(1024 * 1024);
     for (int round = 0; round < 10; round++)
     {
-        Page* a = chunk.allocate_page();
-        Page* b = chunk.allocate_page();
-        Page* c = chunk.allocate_page();
+        PageHead* a = chunk.allocate_page();
+        PageHead* b = chunk.allocate_page();
+        PageHead* c = chunk.allocate_page();
         CHECK(a != nullptr);
         CHECK(b != nullptr);
         CHECK(c != nullptr);
@@ -288,8 +288,8 @@ TEST(alloc_free_alloc_cycle)
 TEST(huge_page_boundary_case)
 {
     Chunk chunk(1024 * 1024);
-    size_t sz = Page::NORMAL_PAGE_SIZE + 1;
-    Page* p = chunk.allocate_huge_page(sz);
+    size_t sz = PageHead::NORMAL_PAGE_SIZE + 1;
+    PageHead* p = chunk.allocate_huge_page(sz);
     CHECK(p != nullptr);
     CHECK_EQ(chunk.validate(p), p);
     chunk.free_page(p);
@@ -301,7 +301,7 @@ TEST(concurrent_alloc_free_128_pages)
 
     constexpr int kPages = 128;
     constexpr int kThreads = 4;
-    std::atomic<Page*> slots[kPages] = {};
+    std::atomic<PageHead*> slots[kPages] = {};
     std::atomic<int> next_idx{0};
     std::atomic<int> alloc_count{0};
     std::atomic<int> free_count{0};
@@ -311,7 +311,7 @@ TEST(concurrent_alloc_free_128_pages)
     {
         while (true)
         {
-            Page* p = chunk.allocate_page();
+            PageHead* p = chunk.allocate_page();
             if (!p)
             {
                 if (done.load(std::memory_order_acquire))
@@ -337,7 +337,7 @@ TEST(concurrent_alloc_free_128_pages)
             bool any_freed = false;
             for (int i = 0; i < kPages; i++)
             {
-                Page* p = slots[i].exchange(nullptr, std::memory_order_acq_rel);
+                PageHead* p = slots[i].exchange(nullptr, std::memory_order_acq_rel);
                 if (p)
                 {
                     CHECK_EQ(chunk.validate(p), p);
@@ -375,11 +375,11 @@ TEST(concurrent_mixed_alloc_free)
     {
         for (int i = 0; i < kIterations; i++)
         {
-            Page* a = chunk.allocate_page();
+            PageHead* a = chunk.allocate_page();
             if (!a)
                 continue;
 
-            Page* b = chunk.allocate_page();
+            PageHead* b = chunk.allocate_page();
             if (!b)
             {
                 chunk.free_page(a);
@@ -415,7 +415,7 @@ TEST(concurrent_huge_page_and_validate)
     {
         for (int i = 0; i < 200; i++)
         {
-            Page* p = chunk.allocate_page();
+            PageHead* p = chunk.allocate_page();
             if (p)
             {
                 CHECK_EQ(chunk.validate(p), p);
@@ -432,10 +432,10 @@ TEST(concurrent_huge_page_and_validate)
     {
         for (int i = 0; i < 50; i++)
         {
-            Page* p = chunk.allocate_huge_page(2 * Page::NORMAL_PAGE_SIZE);
+            PageHead* p = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
             if (p)
             {
-                void* interior = reinterpret_cast<char*>(p) + Page::NORMAL_PAGE_SIZE + 100;
+                void* interior = reinterpret_cast<char*>(p) + PageHead::NORMAL_PAGE_SIZE + 100;
                 CHECK_EQ(chunk.validate(interior), p);
                 chunk.free_page(p);
             }
