@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cassert>
 #include <atomic>
 #include <array>
 #include <utility>
@@ -108,8 +109,56 @@ namespace woomem
     static_assert(sizeof(UnitHead) == 8);
 
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
-    inline void* allocate_unit_from_page(PageHead* page)
+    inline void* pick_unit_from_page_without_init(PageHead* page)
     {
-        
+        constexpr uint16_t UNIT_PAGE_HEAD_SIZE = static_cast<uint16_t>(sizeof(PageHead) + sizeof(PageUnitAlloc));
+
+        PageUnitAlloc* const page_alloc_head = reinterpret_cast<PageUnitAlloc*>(page + 1);
+        const UnitAllocGroup group_type = static_cast<UnitAllocGroup>(page_alloc_head->__reserved__);
+        const uint16_t unit_size_with_head = static_cast<uint16_t>(sizeof(UnitHead) + GROUP_SIZE_LOOKUP_TABLE[group_type]);
+
+        uint16_t current_offset = page_alloc_head->m_next_allocate_unit_offset;
+        do
+        {
+            if (current_offset != 0)
+            {
+                UnitHead* const allocating_unit = reinterpret_cast<UnitHead*>(
+                    reinterpret_cast<char*>(page) + current_offset);
+
+                page_alloc_head->m_next_allocate_unit_offset =
+                    allocating_unit->m_next_free_unit_offset;
+
+                assert(UnitLife::RELEASED == allocating_unit->m_life.load(
+                    std::memory_order::memory_order_relaxed));
+
+                return allocating_unit + 1;
+            }
+
+            current_offset = page_alloc_head->m_freed_unit_offset.exchange(0);
+            if (current_offset == 0)
+                return nullptr;
+
+            page_alloc_head->m_next_allocate_unit_offset = current_offset;
+
+        } while (1);
+    }
+    inline void drop_freed_unit_into_page(PageHead* page, UnitHead* unit)
+    {
+        const auto unit_offset = static_cast<uint16_t>(
+            reinterpret_cast<char*>(unit) - reinterpret_cast<char*>(page));
+        PageUnitAlloc* const page_alloc_head = reinterpret_cast<PageUnitAlloc*>(page + 1);
+
+        assert(UnitLife::RELEASED == unit->m_life.load(
+            std::memory_order::memory_order_relaxed));
+
+        unit->m_next_free_unit_offset = page_alloc_head->m_freed_unit_offset.load(
+            std::memory_order::memory_order_relaxed);
+        do
+        {
+        } while (!page_alloc_head->m_freed_unit_offset.compare_exchange_weak(
+            unit->m_next_free_unit_offset,
+            unit_offset,
+            std::memory_order::memory_order_release,
+            std::memory_order::memory_order_relaxed));
     }
 }
