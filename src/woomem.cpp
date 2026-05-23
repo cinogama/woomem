@@ -26,13 +26,12 @@ struct _woomem_GlobalContext
     {
         page->m_next_page = m_page_list.load(std::memory_order_relaxed);
 
-        do
-        {
-        } while (!m_page_list.compare_exchange_weak(
+        while (!m_page_list.compare_exchange_weak(
             page->m_next_page,
             page,
             std::memory_order_release,
-            std::memory_order_relaxed));
+            std::memory_order_relaxed))
+            /* Atomic retry */;
     }
     woomem::PageHead* allocate_new_page()
     {

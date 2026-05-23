@@ -165,12 +165,12 @@ namespace woomem
 
         unit->m_next_free_unit_offset = page_alloc_head->m_freed_unit_offset.load(
             std::memory_order::memory_order_relaxed);
-        do
-        {
-        } while (!page_alloc_head->m_freed_unit_offset.compare_exchange_weak(
+        
+        while (!page_alloc_head->m_freed_unit_offset.compare_exchange_weak(
             unit->m_next_free_unit_offset,
             unit_offset,
             std::memory_order::memory_order_release,
-            std::memory_order::memory_order_relaxed));
+            std::memory_order::memory_order_relaxed))
+            /* Atomic retry */;
     }
 }

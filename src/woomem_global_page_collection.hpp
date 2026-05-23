@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <vector>
 
 #include "woomem_chunk.hpp"
 #include "woomem_page.hpp"
@@ -11,12 +12,52 @@ namespace woomem
 {
     class GlobalPageCollection
     {
+        struct FreePageList
+        {
+            std::atomic_flag        m_spin;
+            std::vector<PageHead*>  m_pages;
+
+            FreePageList()
+            {
+                m_spin.clear();
+            }
+
+            FreePageList(const FreePageList&) = delete;
+            FreePageList(FreePageList&&) = delete;
+            FreePageList& operator=(const FreePageList&) = delete;
+            FreePageList& operator=(FreePageList&&) = delete;
+
+            PageHead* pick_free_page()
+            {
+                while (m_spin.test_and_set(std::memory_order_acquire))
+                    ;
+
+                PageHead* page = nullptr;
+                if (!m_pages.empty())
+                {
+                    page = m_pages.back();
+                    m_pages.pop_back();
+                }
+
+                m_spin.clear(std::memory_order_release);
+                return page;
+            }
+            void return_free_page(PageHead* page)
+            {
+                while (m_spin.test_and_set(std::memory_order_acquire))
+                    ;
+
+                m_pages.push_back(page);
+
+                m_spin.clear(std::memory_order_release);
+            }
+        };
+
         Chunk* m_chunk;
-        std::atomic<PageHead*> m_free_pages[UnitAllocGroup::MAX_GROUP];
+        FreePageList m_free_pages[UnitAllocGroup::MAX_GROUP];
     public:
         GlobalPageCollection(Chunk* chunk)
             : m_chunk(chunk)
-            , m_free_pages{}
         {
             assert(chunk != nullptr && !chunk->is_init_failed());
         }
@@ -29,17 +70,10 @@ namespace woomem
     public:
         PageHead* require_normal_page(UnitAllocGroup group)
         {
-            PageHead* page = m_free_pages[group].load(std::memory_order_acquire);
-            while (page != nullptr)
+            PageHead* page = m_free_pages[group].pick_free_page();
+            if (page != nullptr)
             {
-                PageHead* next = page->m_next_page;
-                if (m_free_pages[group].compare_exchange_weak(
-                    page, next,
-                    std::memory_order_release,
-                    std::memory_order_acquire))
-                {
-                    return page;
-                }
+                return page;
             }
 
             page = m_chunk->allocate_page();
@@ -52,15 +86,7 @@ namespace woomem
 
         void return_page(PageHead* page, UnitAllocGroup group)
         {
-            PageHead* head = m_free_pages[group].load(std::memory_order_relaxed);
-            do
-            {
-                page->m_next_page = head;
-            } while (!m_free_pages[group].compare_exchange_weak(
-                head,
-                page,
-                std::memory_order_release,
-                std::memory_order_relaxed));
+            m_free_pages[group].return_free_page(page);
         }
     };
 }
