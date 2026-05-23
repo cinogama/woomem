@@ -88,6 +88,14 @@ namespace woomem
     };
     static_assert(sizeof(PageUnitAlloc) == 8);
 
+    enum UnitLife : uint8_t
+    {
+        RELEASED,
+        UNMARKED,
+        SELF_MARKED,
+        FULL_MARKED,
+    };
+
     struct UnitHead
     {
         uint16_t            m_next_free_unit_offset;
@@ -100,4 +108,8 @@ namespace woomem
     static_assert(sizeof(UnitHead) == 8);
 
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
+    inline void* allocate_unit_from_page(PageHead* page)
+    {
+        
+    }
 }
