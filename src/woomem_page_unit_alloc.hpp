@@ -112,7 +112,7 @@ namespace woomem
     static_assert(sizeof(UnitHead) == 8);
 
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
-    inline void* pick_unit_from_page_without_init(PageHead* page)
+    inline UnitHead* pick_unit_from_page_without_init(PageHead* page)
     {
         constexpr uint16_t UNIT_PAGE_HEAD_SIZE = 
             static_cast<uint16_t>(sizeof(PageHead) + sizeof(PageUnitAlloc));
@@ -134,7 +134,7 @@ namespace woomem
                 assert(UnitLife::RELEASED == allocating_unit->m_life.load(
                     std::memory_order::memory_order_relaxed));
 
-                return allocating_unit + 1;
+                return allocating_unit;
             }
 
             current_offset = page_alloc_head->m_freed_unit_offset.exchange(

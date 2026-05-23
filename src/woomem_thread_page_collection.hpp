@@ -13,10 +13,12 @@ namespace woomem
     class ThreadPageCollection
     {
         GlobalPageCollection* m_global_page_collection;
+        PageHead* m_cached_pages[UnitAllocGroup::MAX_GROUP];
 
     public:
         ThreadPageCollection(GlobalPageCollection* global_page_collection)
             : m_global_page_collection(global_page_collection)
+            , m_cached_pages{}
         {}
         ~ThreadPageCollection()
         {}
@@ -27,7 +29,7 @@ namespace woomem
         ThreadPageCollection& operator=(ThreadPageCollection&&) = delete;
 
     public:
-        void* allocate_unit_in_page(size_t unit_size)
+        UnitHead* pick_unit_in_page(size_t unit_size)
         {
             assert(unit_size <= MAX_IN_PAGE_UNIT_SIZE);
 
@@ -49,7 +51,21 @@ namespace woomem
                     belong_group = UnitAllocGroup::MIDIUM_16360;
             }
 
+            PageHead* cached_page = m_cached_pages[belong_group];
+            if (cached_page != nullptr)
+            {
+            _label_retry_allocate_with_new_page:
+                UnitHead* const unit = pick_unit_from_page_without_init(cached_page);
+                if (unit != nullptr)
+                    return unit;
+            }
 
+            cached_page = m_global_page_collection->require_normal_page(belong_group);
+            if (cached_page == nullptr)
+                return nullptr;
+
+            m_cached_pages[belong_group] = cached_page;
+            goto _label_retry_allocate_with_new_page;
         }
     };
 }
