@@ -4,6 +4,9 @@
 #include "woomem_page.hpp"
 #include "woomem_chunk.hpp"
 
+#include "woomem_global_page_collection.hpp"
+#include "woomem_thread_page_collection.hpp"
+
 #include <cassert>
 
 bool woomem_is_gc_in_marking = false;

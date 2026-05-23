@@ -1,6 +1,8 @@
+#pragma once
+
 namespace woomem
 {
-    struct ThreadPageCollection
+    class ThreadPageCollection
     {
     };
 }
