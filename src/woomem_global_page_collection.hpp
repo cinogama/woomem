@@ -16,6 +16,7 @@ namespace woomem
     public:
         GlobalPageCollection(Chunk* chunk)
             : m_chunk(chunk)
+            , m_free_pages{}
         {
             assert(chunk != nullptr && !chunk->is_init_failed());
         }
@@ -28,6 +29,25 @@ namespace woomem
     public:
         PageHead* require_normal_page(UnitAllocGroup group)
         {
+            PageHead* page = m_free_pages[group].load(std::memory_order_relaxed);
+            while (page != nullptr)
+            {
+                PageHead* next = page->m_next_page;
+                if (m_free_pages[group].compare_exchange_weak(
+                    page, next,
+                    std::memory_order_release,
+                    std::memory_order_relaxed))
+                {
+                    return page;
+                }
+            }
+
+            page = m_chunk->allocate_page();
+            if (page != nullptr)
+            {
+                init_page_for_unit_allocating(page, group);
+            }
+            return page;
         }
     };
 }

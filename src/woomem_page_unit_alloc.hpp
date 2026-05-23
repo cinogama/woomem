@@ -33,10 +33,12 @@ namespace woomem
     };
 
     static constexpr size_t MAX_SMALL_UNIT_SIZE = 984;
+    static constexpr size_t MAX_IN_PAGE_UNIT_SIZE = 16360;
+
     static constexpr size_t GROUP_SIZE_LOOKUP_TABLE[MAX_GROUP] = {
         16, 40, 88, 168, 344, 520, 736, 984, 1480, 2948, 5448, 8176, 16360
     };
-    static_assert(GROUP_SIZE_LOOKUP_TABLE[MIDIUM_16360] == 16360);
+    static_assert(GROUP_SIZE_LOOKUP_TABLE[MIDIUM_16360] == MAX_IN_PAGE_UNIT_SIZE);
 
     static constexpr size_t SMALL_UNIT_FAST_LOOKUP_SHIFT = 3;
     static constexpr UnitAllocGroup SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE[] =
