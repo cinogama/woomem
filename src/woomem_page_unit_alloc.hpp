@@ -111,11 +111,15 @@ namespace woomem
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
     inline void* pick_unit_from_page_without_init(PageHead* page)
     {
-        constexpr uint16_t UNIT_PAGE_HEAD_SIZE = static_cast<uint16_t>(sizeof(PageHead) + sizeof(PageUnitAlloc));
+        constexpr uint16_t UNIT_PAGE_HEAD_SIZE = 
+            static_cast<uint16_t>(sizeof(PageHead) + sizeof(PageUnitAlloc));
 
-        PageUnitAlloc* const page_alloc_head = reinterpret_cast<PageUnitAlloc*>(page + 1);
-        const UnitAllocGroup group_type = static_cast<UnitAllocGroup>(page_alloc_head->__reserved__);
-        const uint16_t unit_size_with_head = static_cast<uint16_t>(sizeof(UnitHead) + GROUP_SIZE_LOOKUP_TABLE[group_type]);
+        PageUnitAlloc* const page_alloc_head = 
+            reinterpret_cast<PageUnitAlloc*>(page + 1);
+        const UnitAllocGroup group_type = 
+            static_cast<UnitAllocGroup>(page_alloc_head->__reserved__);
+        const uint16_t unit_size_with_head = 
+            static_cast<uint16_t>(sizeof(UnitHead) + GROUP_SIZE_LOOKUP_TABLE[group_type]);
 
         uint16_t current_offset = page_alloc_head->m_next_allocate_unit_offset;
         do

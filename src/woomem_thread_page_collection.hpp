@@ -1,0 +1,6 @@
+namespace woomem
+{
+    struct ThreadPageCollection
+    {
+    };
+}
