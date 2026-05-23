@@ -24,7 +24,7 @@ typedef enum woomem_Attrib
 typedef void woomem_MarkCallback(void*);
 typedef void woomem_FreeCallback(void*);
 
-void woomem_init(
+bool woomem_init(
     size_t reserved_chunk_size,
     woomem_MarkCallback mark_callback,
     woomem_FreeCallback free_callback);

@@ -4,6 +4,8 @@
 #include "woomem_page.hpp"
 #include "woomem_chunk.hpp"
 
+#include <cassert>
+
 bool woomem_is_gc_in_marking = false;
 
 struct _woomem_GlobalContext
@@ -17,7 +19,7 @@ struct _woomem_GlobalContext
         , m_page_list{}
     {}
 
-    void _add_page_into_chain(woomem::PageHead* page)
+    void add_page_into_chain(woomem::PageHead* page)
     {
         page->m_next_page = m_page_list.load(std::memory_order_relaxed);
 
@@ -29,36 +31,46 @@ struct _woomem_GlobalContext
             std::memory_order_release,
             std::memory_order_relaxed));
     }
-
     woomem::PageHead* allocate_new_page()
     {
-        woomem::PageHead* const page = m_chunk.allocate_page();
-        if (page != nullptr)
-        {
-            _add_page_into_chain(page);
-        }
-        return page;
+        return m_chunk.allocate_page();
     }
     woomem::PageHead* allocate_huge_page(size_t size)
     {
-        woomem::PageHead* const huge_page = m_chunk.allocate_huge_page(size);
-        if (huge_page != nullptr)
-        {
-            _add_page_into_chain(huge_page);
-        }
-        return huge_page;
+        return m_chunk.allocate_huge_page(size);
     }
 };
-static _woomem_GlobalContext* _s_ctx;
+static _woomem_GlobalContext* _s_ctx = nullptr;
 
-void woomem_init(
+bool woomem_init(
     size_t reserved_chunk_size,
     woomem_MarkCallback mark_callback,
     woomem_FreeCallback free_callback)
 {
+    assert(_s_ctx == nullptr);
 
+    _s_ctx = static_cast<_woomem_GlobalContext*>(malloc(sizeof(_woomem_GlobalContext)));
+    if (_s_ctx == nullptr)
+        return false;
+
+    (void)new (_s_ctx)_woomem_GlobalContext(reserved_chunk_size);
+    if (_s_ctx->m_chunk.is_init_failed())
+    {
+        woomem_shutdown();
+        return false;
+    }
+
+    return true;
 }
-void woomem_shutdown(void);
+void woomem_shutdown(void)
+{
+    assert(_s_ctx != nullptr);
+
+    _s_ctx->~_woomem_GlobalContext();
+    free(_s_ctx);
+}
+
+// ======================================================================
 
 void woomem_trigger_gc(bool async);
 

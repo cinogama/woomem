@@ -21,6 +21,8 @@ namespace woomem
         Chunk& operator = (const Chunk&) = delete;
         Chunk& operator = (Chunk&&) = delete;
 
+        bool is_init_failed()const;
+
         PageHead* allocate_page();
         PageHead* allocate_huge_page(size_t size);
         void free_page(PageHead* page);

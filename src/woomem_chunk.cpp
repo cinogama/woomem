@@ -132,6 +132,11 @@ namespace woomem
         }
     }
 
+    bool Chunk::is_init_failed() const
+    {
+        return base_ == nullptr;
+    }
+
     PageHead* Chunk::allocate_block(size_t order)
     {
         assert(base_ != nullptr);
