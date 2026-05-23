@@ -36,7 +36,7 @@ namespace woomem
                 if (m_free_pages[group].compare_exchange_weak(
                     page, next,
                     std::memory_order_release,
-                    std::memory_order_relaxed))
+                    std::memory_order_acquire))
                 {
                     return page;
                 }
@@ -57,7 +57,8 @@ namespace woomem
             {
                 page->m_next_page = head;
             } while (!m_free_pages[group].compare_exchange_weak(
-                head, page,
+                head,
+                page,
                 std::memory_order_release,
                 std::memory_order_relaxed));
         }
