@@ -27,9 +27,9 @@ namespace woomem
         for (size_t i = 0; i < unit_count; i++)
         {
             const auto unit_offset =
-                static_cast<uint16_t>(UNIT_PAGE_HEAD_SIZE + i * group_unit_size_include_unit_head);
+                static_cast<uint16_t>(i * group_unit_size_include_unit_head);
             UnitHead* unit =
-                reinterpret_cast<UnitHead*>(reinterpret_cast<char*>(page) + unit_offset);
+                reinterpret_cast<UnitHead*>(unit_real_storage_place + unit_offset);
 
             unit->m_next_free_unit_offset = (i + 1 < unit_count)
                 ? static_cast<uint16_t>(unit_offset + group_unit_size_include_unit_head)

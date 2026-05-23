@@ -40,7 +40,6 @@ namespace woomem
     };
     static_assert(GROUP_SIZE_LOOKUP_TABLE[MIDIUM_16360] == MAX_IN_PAGE_UNIT_SIZE);
 
-    static constexpr size_t SMALL_UNIT_FAST_LOOKUP_SHIFT = 3;
     static constexpr UnitAllocGroup SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE[] =
     {
         // 0
@@ -73,9 +72,10 @@ namespace woomem
         SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
         SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
     };
+#define WOOMEM_FAST_LOOKUP_GROUP_INDEX(SIZE) (((SIZE) + 7) >> 3)
     static_assert(
         sizeof(SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE) / sizeof(UnitAllocGroup)
-        == (MAX_SMALL_UNIT_SIZE >> SMALL_UNIT_FAST_LOOKUP_SHIFT) + 1);
+        == WOOMEM_FAST_LOOKUP_GROUP_INDEX(MAX_SMALL_UNIT_SIZE) + 1);
 
     /*
     * (32768 - (16 + 8)) % (x + 8)

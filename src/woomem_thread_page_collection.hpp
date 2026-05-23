@@ -43,7 +43,8 @@ namespace woomem
             UnitAllocGroup belong_group;
 
             if (unit_size <= MAX_SMALL_UNIT_SIZE)
-                belong_group = SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE[unit_size >> SMALL_UNIT_FAST_LOOKUP_SHIFT];
+                belong_group = SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE[
+                    WOOMEM_FAST_LOOKUP_GROUP_INDEX(unit_size)];
             else
             {
                 if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_1480])

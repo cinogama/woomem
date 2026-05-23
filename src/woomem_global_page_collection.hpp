@@ -29,7 +29,7 @@ namespace woomem
     public:
         PageHead* require_normal_page(UnitAllocGroup group)
         {
-            PageHead* page = m_free_pages[group].load(std::memory_order_relaxed);
+            PageHead* page = m_free_pages[group].load(std::memory_order_acquire);
             while (page != nullptr)
             {
                 PageHead* next = page->m_next_page;
