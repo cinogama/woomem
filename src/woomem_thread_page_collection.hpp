@@ -16,18 +16,17 @@ namespace woomem
         PageHead* m_cached_pages[UnitAllocGroup::MAX_GROUP];
 
     public:
-        ThreadPageCollection(GlobalPageCollection* global_page_collection)
+        ThreadPageCollection(/* OPTIONAL */ GlobalPageCollection* global_page_collection)
             : m_global_page_collection(global_page_collection)
             , m_cached_pages{}
-        {}
+        {
+            /*
+            NOTE: global_page_collection might be nullptr if woomem is not inited yet.
+            */
+        }
         ~ThreadPageCollection()
         {
-            for (int i = 0; i < UnitAllocGroup::MAX_GROUP; ++i)
-            {
-                PageHead* page = m_cached_pages[i];
-                if (page != nullptr)
-                    m_global_page_collection->return_page(page, static_cast<UnitAllocGroup>(i));
-            }
+            shutdown_manually();
         }
 
         ThreadPageCollection(const ThreadPageCollection&) = delete;
@@ -35,10 +34,29 @@ namespace woomem
         ThreadPageCollection(ThreadPageCollection&&) = delete;
         ThreadPageCollection& operator=(ThreadPageCollection&&) = delete;
 
+        void init_manually(GlobalPageCollection* global_page_collection)
+        {
+            assert(m_global_page_collection == nullptr);
+            m_global_page_collection = global_page_collection;
+        }
+        void shutdown_manually()
+        {
+            if (m_global_page_collection != nullptr)
+            {
+                for (int i = 0; i < UnitAllocGroup::MAX_GROUP; ++i)
+                {
+                    PageHead* page = m_cached_pages[i];
+                    if (page != nullptr)
+                        m_global_page_collection->return_page(page, static_cast<UnitAllocGroup>(i));
+                }
+                m_global_page_collection = nullptr;
+            }
+        }
+
     public:
         UnitHead* pick_unit_in_page(size_t unit_size)
         {
-            assert(unit_size <= MAX_IN_PAGE_UNIT_SIZE);
+            assert(m_global_page_collection != nullptr && unit_size <= MAX_IN_PAGE_UNIT_SIZE);
 
             UnitAllocGroup belong_group;
 
