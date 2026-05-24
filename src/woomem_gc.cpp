@@ -5,6 +5,7 @@
 #include "woomem_gc.hpp"
 #include "woomem_global_context.hpp"
 #include "woomem_thread_context.hpp"
+#include "woomem_page_unit_alloc.hpp"
 
 uint8_t woomem_gc_marking_round_counter = 0;
 bool woomem_gc_marking_state_flag = false;
@@ -150,6 +151,19 @@ namespace woomem
     {
         // TODO: Stop worker thread here.
         m_gc_worker_thread.join();
+    }
+    void GCWorker::mark_unit_to_gray(UnitHead* unit_head)
+    {
+        uint8_t expected = UnitLife::UNMARKED;
+        if (unit_head->m_life.compare_exchange_strong(
+            expected,
+            UnitLife::SELF_MARKED,
+            std::memory_order::memory_order_release,
+            std::memory_order::memory_order_relaxed))
+        {
+            // Ok, this unit already marked.
+            TODO;
+        }
     }
     void GCWorker::worker_thread_job()
     {

@@ -8,6 +8,7 @@
 namespace woomem
 {
     class GC;
+    struct UnitHead;
 
     class GCWorker
     {
