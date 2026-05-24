@@ -79,9 +79,9 @@ namespace woomem
         == WOOMEM_FAST_LOOKUP_GROUP_INDEX(MAX_SMALL_UNIT_SIZE) + 1);
 
     /*
-    * (32768 - (16 + 8)) % (x + 8)
-    * Page layout: [PageHead(16)] [PageUnitAlloc(8)] [[UnitHead(8)][payload(x)]]...
-    * Available per page: 32744 bytes.
+    * (32768 - (24 + 8)) % (x + 8)
+    * Page layout: [PageHead(24)] [PageUnitAlloc(8)] [[UnitHead(8)][payload(x)]]...
+    * Available per page: 32736 bytes.
     */
 
     struct PageUnitAlloc

@@ -37,8 +37,8 @@ void woomem_trigger_gc(bool async);
 
 void* woomem_allocate_begin(size_t size);
 void woomem_allocate_end(void* p, int attrib);
-
 void* woomem_reallocate(void* ptr, size_t size);
+
 void* woomem_validate_addr(void* ptr_may_invalid);
 void* woomem_validate_addr_head(void* ptr_may_invalid);
 

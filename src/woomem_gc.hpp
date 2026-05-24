@@ -24,6 +24,9 @@ namespace woomem
         GCWorker& operator=(GCWorker&&) = delete;
 
     public:
+        void mark_unit_to_gray(UnitHead* unit_head);
+
+    public:
         void worker_thread_job();
     };
     class GC

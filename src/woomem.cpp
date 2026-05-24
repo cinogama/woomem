@@ -111,8 +111,10 @@ void* woomem_reallocate(void* ptr, size_t size)
 void* woomem_validate_addr(void* ptr_may_invalid)
 {
     PageHead* const page_head = g_global_context.m_chunk.validate(ptr_may_invalid);
-    if (page_head != nullptr)
+    if (page_head != nullptr 
+        && page_head->m_page_just_allocated.load(std::memory_order::memory_order_acquire))
     {
+        UnitHead* unit_head;
         if (page_head->m_page_count_if_huge == 0)
         {
             PageUnitAlloc* const page_alloc_head = 
@@ -120,11 +122,26 @@ void* woomem_validate_addr(void* ptr_may_invalid)
 
             const size_t unit_size_with_head = 
                 page_alloc_head->m_unit_size_in_page + sizeof(UnitHead);
+
+            const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr_may_invalid);
+            const uintptr_t storage_begin = reinterpret_cast<uintptr_t>(page_alloc_head + 1);
+
+            if (addr < storage_begin)
+                return nullptr;
+
+            const size_t offset_in_units = addr - storage_begin;
+            const size_t unit_index = offset_in_units / unit_size_with_head;
+
+            unit_head = reinterpret_cast<UnitHead*>(
+                storage_begin + unit_index * unit_size_with_head);
         }
         else
         {
-            return reinterpret_cast<UnitHead*>(page_head + 1) + 1;
+            unit_head = reinterpret_cast<UnitHead*>(page_head + 1);
         }
+
+        if (unit_head->m_life.load(std::memory_order::memory_order_relaxed) != UnitLife::RELEASED)
+            return unit_head + 1;
     }
 
     return nullptr;
@@ -136,4 +153,28 @@ void* woomem_validate_addr_head(void* ptr_may_invalid)
         return woomem_validate_addr(ptr_may_invalid);
     }
     return nullptr;
+}
+
+void woomem_mark_unit_head(void* ptr_head_may_null)
+{
+    if (ptr_head_may_null != nullptr)
+    {
+        t_thread_context.m_gc_marking_context;
+    }
+}
+void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null)
+{
+    void* unit = woomem_validate_addr(ptr_may_invalid_or_null);
+    if (unit != nullptr)
+    {
+
+    }
+}
+void woomem_mark_fuzzy_unit_head(void* ptr_may_invalid_or_null)
+{
+    void* unit = woomem_validate_addr_head(ptr_may_invalid_or_null);
+    if (unit != nullptr)
+    {
+
+    }
 }
