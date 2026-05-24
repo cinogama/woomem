@@ -23,5 +23,5 @@ namespace woomem
             (void)g_global_context.m_thread_entries.erase(this);
         }
     }
-    thread_local ThreadContext g_thread_context;
+    thread_local ThreadContext t_thread_context;
 }

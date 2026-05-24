@@ -88,7 +88,8 @@ namespace woomem
         uint16_t                m_next_allocate_unit_offset;
         std::atomic_uint16_t    m_freed_unit_offset;
         std::atomic_uint8_t     m_run_out;
-        char                    __reserved__[3];
+        char                    __reserved__[1];
+        uint16_t                m_withing_head_unit_size_in_page;
     };
     static_assert(sizeof(PageUnitAlloc) == 8);
 

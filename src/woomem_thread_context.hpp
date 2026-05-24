@@ -18,5 +18,5 @@ namespace woomem
         ThreadContext& operator=(ThreadContext&&) = delete;
     };
 
-    extern thread_local ThreadContext g_thread_context;
+    extern thread_local ThreadContext t_thread_context;
 }

@@ -17,6 +17,9 @@ namespace woomem
         const size_t group_unit_size_include_unit_head =
             sizeof(UnitHead) + GROUP_SIZE_LOOKUP_TABLE[group_type];
 
+        page_alloc_head->m_withing_head_unit_size_in_page = 
+            group_unit_size_include_unit_head;
+
         const size_t available_for_units =
             PageHead::NORMAL_PAGE_SIZE - UNIT_PAGE_HEAD_SIZE;
         const size_t unit_count =

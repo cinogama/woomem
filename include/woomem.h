@@ -32,10 +32,11 @@ void woomem_shutdown(void);
 
 void woomem_trigger_gc(bool async);
 
-void* woomem_validate_addr(void* ptr_may_invalid);
-void* woomem_allocate(size_t size, int attrib);
+void* woomem_allocate_begin(size_t size);
+void woomem_allocate_end(void* p, int attrib);
+
 void* woomem_reallocate(void* ptr, size_t size);
-void woomem_free(void* ptr);
+void* woomem_validate_addr(void* ptr_may_invalid);
 
 void woomem_mark_unit_head(void* ptr_head_may_null);
 void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null);
