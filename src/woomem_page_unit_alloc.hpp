@@ -20,23 +20,23 @@ namespace woomem
         SMALL_344,
         SMALL_520,
         SMALL_736,
-        SMALL_984,
-        MAX_SMALL_GROUP = SMALL_984,
+        SMALL_1048,
+        MAX_SMALL_GROUP = SMALL_1048,
 
-        MIDIUM_1480,
-        MIDIUM_2948,
+        MIDIUM_2720,
         MIDIUM_5448,
         MIDIUM_8176,
+        MIDIUM_10904,
         MIDIUM_16360,
 
         MAX_GROUP
     };
 
-    static constexpr size_t MAX_SMALL_UNIT_SIZE = 984;
+    static constexpr size_t MAX_SMALL_UNIT_SIZE = 1048;
     static constexpr size_t MAX_IN_PAGE_UNIT_SIZE = 16360;
 
     static constexpr size_t GROUP_SIZE_LOOKUP_TABLE[MAX_GROUP] = {
-        16, 40, 88, 168, 344, 520, 736, 984, 1480, 2948, 5448, 8176, 16360
+        16, 40, 88, 168, 344, 520, 736, 1048, 2720, 5448, 8176, 10904, 16360
     };
     static_assert(GROUP_SIZE_LOOKUP_TABLE[MIDIUM_16360] == MAX_IN_PAGE_UNIT_SIZE);
 
@@ -66,11 +66,12 @@ namespace woomem
         SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736,
         SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736, SMALL_736,
         SMALL_736, SMALL_736, SMALL_736,
-        // 737~984(123)
-        SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
-        SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
-        SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
-        SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984, SMALL_984,
+        // 737~1048(131)
+        SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048,
+        SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048,
+        SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048,
+        SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048,
+        SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048, SMALL_1048,
     };
 #define WOOMEM_FAST_LOOKUP_GROUP_INDEX(SIZE) (((SIZE) + 7) >> 3)
     static_assert(
@@ -89,7 +90,7 @@ namespace woomem
         std::atomic_uint16_t    m_freed_unit_offset;
         std::atomic_uint8_t     m_run_out;
         char                    __reserved__[1];
-        uint16_t                m_withing_head_unit_size_in_page;
+        uint16_t                m_unit_size_in_page;
     };
     static_assert(sizeof(PageUnitAlloc) == 8);
 
@@ -103,22 +104,22 @@ namespace woomem
 
     struct UnitHead
     {
-        uint16_t            m_next_free_unit_offset;
+        uint16_t            m_next_free_unit_offset /* m_unit_offset_in_page */;
         char                __reserved__[2];
         uint8_t             m_age;
         uint8_t             m_timing;
-        std::atomic_uint8_t m_life;
         uint8_t             m_attribute;
+        std::atomic_uint8_t m_life;
     };
     static_assert(sizeof(UnitHead) == 8);
 
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
     inline UnitHead* pick_unit_from_page_without_init(PageHead* page)
     {
-        constexpr uint16_t UNIT_PAGE_HEAD_SIZE = 
+        constexpr uint16_t UNIT_PAGE_HEAD_SIZE =
             static_cast<uint16_t>(sizeof(PageHead) + sizeof(PageUnitAlloc));
 
-        PageUnitAlloc* const page_alloc_head = 
+        PageUnitAlloc* const page_alloc_head =
             reinterpret_cast<PageUnitAlloc*>(page + 1);
 
         uint16_t current_offset = page_alloc_head->m_next_allocate_unit_offset;
@@ -131,6 +132,7 @@ namespace woomem
 
                 page_alloc_head->m_next_allocate_unit_offset =
                     allocating_unit->m_next_free_unit_offset;
+                allocating_unit->m_next_free_unit_offset = current_offset;
 
                 assert(UnitLife::RELEASED == allocating_unit->m_life.load(
                     std::memory_order::memory_order_relaxed));
@@ -139,13 +141,13 @@ namespace woomem
             }
 
             current_offset = page_alloc_head->m_freed_unit_offset.exchange(
-                0, 
+                0,
                 std::memory_order::memory_order_acquire);
 
             if (current_offset == 0)
             {
                 page_alloc_head->m_run_out.store(
-                    1, 
+                    1,
                     std::memory_order::memory_order_relaxed);
 
                 return nullptr;
@@ -166,7 +168,7 @@ namespace woomem
 
         unit->m_next_free_unit_offset = page_alloc_head->m_freed_unit_offset.load(
             std::memory_order::memory_order_relaxed);
-        
+
         while (!page_alloc_head->m_freed_unit_offset.compare_exchange_weak(
             unit->m_next_free_unit_offset,
             unit_offset,

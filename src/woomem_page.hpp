@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <cstddef>
+#include <atomic>
+
 namespace woomem
 {
     struct PageHead
@@ -11,11 +15,14 @@ namespace woomem
         {
             struct
             {
+                std::atomic_bool
+                            m_page_just_allocated;
+
+                size_t      m_page_count_if_huge;
                 PageHead*   m_next_page;
-                size_t      m_size_if_huge_page;
             };
-            char __reserved__[16];
+            char __reserved__[24];
         };
     };
-    static_assert(sizeof(PageHead) == 16);
+    static_assert(sizeof(PageHead) == 24);
 }

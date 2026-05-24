@@ -54,7 +54,7 @@ namespace woomem
         }
 
     public:
-        UnitHead* pick_unit_in_page(size_t unit_size)
+        void* pick_unit_in_page(size_t unit_size)
         {
             assert(m_global_page_collection != nullptr && unit_size <= MAX_IN_PAGE_UNIT_SIZE);
 
@@ -65,14 +65,14 @@ namespace woomem
                     WOOMEM_FAST_LOOKUP_GROUP_INDEX(unit_size)];
             else
             {
-                if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_1480])
-                    belong_group = UnitAllocGroup::MIDIUM_1480;
-                else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_2948])
-                    belong_group = UnitAllocGroup::MIDIUM_2948;
+                if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_2720])
+                    belong_group = UnitAllocGroup::MIDIUM_2720;
                 else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_5448])
                     belong_group = UnitAllocGroup::MIDIUM_5448;
                 else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_8176])
                     belong_group = UnitAllocGroup::MIDIUM_8176;
+                else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_10904])
+                    belong_group = UnitAllocGroup::MIDIUM_10904;
                 else
                     belong_group = UnitAllocGroup::MIDIUM_16360;
             }
@@ -83,7 +83,7 @@ namespace woomem
             _label_retry_allocate_with_new_page:
                 UnitHead* const unit = pick_unit_from_page_without_init(cached_page);
                 if (unit != nullptr)
-                    return unit;
+                    return unit + 1;
             }
 
             cached_page = m_global_page_collection->require_normal_page(belong_group);

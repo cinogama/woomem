@@ -85,18 +85,19 @@ namespace woomem
             state_ = nullptr;
             links_ = nullptr;
             free_lists_ = nullptr;
+            commit_ = nullptr;
             return;
         }
-        woomem_os_commit_memory(base_, reserved_size_);
-
         state_ = new std::atomic<uint8_t>[total_pages_];
         links_ = new std::atomic<uint64_t>[total_pages_];
         free_lists_ = new std::atomic<uint64_t>[max_order_ + 1];
+        commit_ = new std::atomic<uint8_t>[total_pages_];
 
         for (size_t i = 0; i < total_pages_; ++i)
         {
             state_[i].store(0, std::memory_order_relaxed);
             links_[i].store(PACKED_NULL, std::memory_order_relaxed);
+            commit_[i].store(0, std::memory_order_relaxed);
         }
 
         for (size_t i = 0; i <= max_order_; ++i)
@@ -126,6 +127,7 @@ namespace woomem
         delete[] state_;
         delete[] links_;
         delete[] free_lists_;
+        delete[] commit_;
         if (base_)
         {
             woomem_os_release_memory(base_, reserved_size_);
@@ -135,6 +137,21 @@ namespace woomem
     bool Chunk::is_init_failed() const
     {
         return base_ == nullptr;
+    }
+
+    PageHead* Chunk::commit_page(size_t idx)
+    {
+        PageHead* const commiting_page = index_to_page(idx);
+
+        // NOTE: No need to CAS, one page cannot be commit same time in different threads.
+        if (commit_[idx].load(std::memory_order_relaxed) == 0)
+        {
+            woomem_os_commit_memory(
+                commiting_page,
+                PageHead::NORMAL_PAGE_SIZE);
+            commit_[idx].store(1, std::memory_order_relaxed);
+        }
+        return commiting_page;
     }
 
     PageHead* Chunk::allocate_block(size_t order)
@@ -197,19 +214,27 @@ namespace woomem
                             std::memory_order_acquire));
                     }
 
+                    const size_t block_pages = size_t(1) << order;
+
+                    PageHead* const page = commit_page(idx);
+                    page->m_page_just_allocated.store(
+                        true, std::memory_order::memory_order_relaxed);
+
                     state_[idx].store(
                         static_cast<uint8_t>(
                             (order << STATE_ORDER_SHIFT) | STATE_ALLOCATED),
                         std::memory_order_release);
 
-                    size_t block_pages = size_t(1) << order;
                     for (size_t j = 1; j < block_pages; ++j)
                     {
-                        state_[idx + j].store(
+                        const size_t page_index = idx + j;
+
+                        (void)commit_page(page_index);
+                        state_[page_index].store(
                             STATE_CONTINUATION, std::memory_order_release);
                     }
 
-                    return index_to_page(idx);
+                    return page;
                 }
             }
         }
@@ -220,7 +245,7 @@ namespace woomem
     {
         PageHead* page = allocate_block(0);
         if (page != nullptr)
-            page->m_size_if_huge_page = 0;
+            page->m_page_count_if_huge = 0;
         return page;
     }
 
@@ -235,7 +260,7 @@ namespace woomem
 
         PageHead* page = allocate_block(order);
         if (page != nullptr)
-            page->m_size_if_huge_page = required_pages;
+            page->m_page_count_if_huge = required_pages;
         return page;
     }
 

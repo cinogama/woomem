@@ -14,20 +14,22 @@ extern bool woomem_is_gc_in_marking;
 
 typedef enum woomem_Attrib
 {
-    WOOMEM_ATTRIB_NEED_SWEEP        = 1,
-    WOOMEM_ATTRIB_AUTO_MARK         = 1 << 1,
-    WOOMEM_ATTRIB_MARK_CALLBACK     = 1 << 2,
-    WOOMEM_ATTRIB_FREE_CALLBACK     = 1 << 3,
+    WOOMEM_ATTRIB_NEED_SWEEP = 1,
+    WOOMEM_ATTRIB_AUTO_MARK = 1 << 1,
+    WOOMEM_ATTRIB_MARK_CALLBACK = 1 << 2,
+    WOOMEM_ATTRIB_FREE_CALLBACK = 1 << 3,
 
 }woomem_Attrib;
 
-typedef void woomem_MarkCallback(void*);
-typedef void woomem_FreeCallback(void*);
+typedef void (*woomem_MarkCallback)(void*);
+typedef void (*woomem_FreeCallback)(void*);
+typedef void (*woomem_GCCallback)(void);
 
 bool woomem_init(
     size_t reserved_chunk_size,
     woomem_MarkCallback mark_callback,
-    woomem_FreeCallback free_callback);
+    woomem_FreeCallback free_callback,
+    woomem_GCCallback gc_callback_at_begin);
 void woomem_shutdown(void);
 
 void woomem_trigger_gc(bool async);

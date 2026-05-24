@@ -54,12 +54,14 @@ namespace woomem
 
         PageHead* allocate_block(size_t order);
         void remove_from_free_list_defrag(size_t order, uint32_t target);
+        PageHead* commit_page(size_t idx);
 
         void* base_;
         size_t reserved_size_;
         size_t total_pages_;
         size_t max_order_;
 
+        std::atomic<uint8_t>*  commit_;
         std::atomic<uint8_t>*  state_;
         std::atomic<uint64_t>* links_;
         std::atomic<uint64_t>* free_lists_;

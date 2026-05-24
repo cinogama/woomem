@@ -65,6 +65,12 @@ namespace woomem
 
     void GlobalContext::add_page_into_chain(PageHead* page)
     {
+        assert(page->m_page_just_allocated.load(
+            std::memory_order::memory_order_relaxed));
+
+        page->m_page_just_allocated.store(
+            false, std::memory_order::memory_order_release);
+
         page->m_next_page = m_all_page_list.load(std::memory_order_relaxed);
 
         while (!m_all_page_list.compare_exchange_weak(
