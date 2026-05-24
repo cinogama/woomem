@@ -10,7 +10,8 @@ extern "C" {
 #   include <stdbool.h>
 #endif
 
-extern bool woomem_is_gc_in_marking;
+extern uint8_t  woomem_gc_marking_round_counter;
+extern bool     woomem_gc_marking_state_flag;
 
 typedef enum woomem_Attrib
 {
@@ -39,9 +40,11 @@ void woomem_allocate_end(void* p, int attrib);
 
 void* woomem_reallocate(void* ptr, size_t size);
 void* woomem_validate_addr(void* ptr_may_invalid);
+void* woomem_validate_addr_head(void* ptr_may_invalid);
 
 void woomem_mark_unit_head(void* ptr_head_may_null);
 void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null);
+void woomem_mark_fuzzy_unit_head(void* ptr_may_invalid_or_null);
 
 #ifdef __cplusplus
 }

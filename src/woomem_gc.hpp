@@ -7,28 +7,43 @@
 
 namespace woomem
 {
+    class GC;
+
+    class GCWorker
+    {
+        GC* m_gc_ctx;
+
+        std::thread m_gc_worker_thread;
+    public:
+        GCWorker(GC* gc_ctx);
+        ~GCWorker();
+
+        GCWorker(const GCWorker&) = delete;
+        GCWorker& operator=(const GCWorker&) = delete;
+        GCWorker(GCWorker&&) = delete;
+        GCWorker& operator=(GCWorker&&) = delete;
+
+    public:
+        void worker_thread_job();
+    };
     class GC
     {
-        struct GCWorker
-        {
-            std::thread m_gc_worker_thread;
-            GC* m_gc_ctx;
-
-            GCWorker(GC* gc_ctx);
-
-            GCWorker(const GCWorker&) = delete;
-            GCWorker& operator=(const GCWorker&) = delete;
-            GCWorker(GCWorker&&) = delete;
-            GCWorker& operator=(GCWorker&&) = delete;
-        };
-
-        const size_t            m_gc_worker_count;
-        woomem_GCCallback       m_gc_callback_at_begin;
-
+    public:
         enum class WorkerThresholdState
         {
             PENDING,
+            PARALLEL_MARK,
+            FINAL_MARK,
+            SWEEP,
         };
+
+    private:
+        const size_t            m_gc_worker_count;
+        std::atomic_size_t      m_gc_assigned_thread_idx;
+        woomem_GCCallback       m_gc_callback_at_begin;
+        woomem_GCCallback       m_gc_callback_at_stop_marking;
+        woomem_GCCallback       m_gc_callback_at_end;
+
         WorkerThresholdState    m_gc_worker_threshold_launch_state;
         size_t                  m_gc_worker_threshold_finish_counter;
         std::mutex              m_gc_worker_threshold_mx;
@@ -44,7 +59,9 @@ namespace woomem
         GC& operator=(GC&&) = delete;
 
         GC(size_t worker_count, 
-            woomem_GCCallback begin_callback_for_marking_root);
+            woomem_GCCallback callback_for_marking_root,
+            woomem_GCCallback callback_stop_marking,
+            woomem_GCCallback callback_mark_end);
         ~GC();
 
     public:
@@ -52,6 +69,10 @@ namespace woomem
             WorkerThresholdState expected_state);
         void wait_for_worker_launch(
             WorkerThresholdState expected_state);
+        void worker_done_and_notify_main_gc_thread();
+
+    public:
+        GCWorker* fetch_thread_worker();
 
     public:
         void main_thread_job();

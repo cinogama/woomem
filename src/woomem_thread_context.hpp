@@ -4,10 +4,12 @@
 
 namespace woomem
 {
+    class GCWorker;
     class ThreadContext
     {
     public:
         ThreadPageCollection m_thread_page_collection;
+        /* OPTIONAL */ GCWorker* m_gc_marking_context;
 
         ThreadContext();
         ~ThreadContext();

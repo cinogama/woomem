@@ -11,8 +11,6 @@
 
 using namespace woomem;
 
-bool woomem_is_gc_in_marking = false;
-
 bool woomem_init(
     size_t reserved_chunk_size,
     woomem_MarkCallback mark_callback,
@@ -110,5 +108,32 @@ void* woomem_reallocate(void* ptr, size_t size)
     return new_ptr;
 }
 
-void woomem_mark_unit_head(void* ptr_head_may_null);
-void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null);
+void* woomem_validate_addr(void* ptr_may_invalid)
+{
+    PageHead* const page_head = g_global_context.m_chunk.validate(ptr_may_invalid);
+    if (page_head != nullptr)
+    {
+        if (page_head->m_page_count_if_huge == 0)
+        {
+            PageUnitAlloc* const page_alloc_head = 
+                reinterpret_cast<PageUnitAlloc*>(page_head + 1);
+
+            const size_t unit_size_with_head = 
+                page_alloc_head->m_unit_size_in_page + sizeof(UnitHead);
+        }
+        else
+        {
+            return reinterpret_cast<UnitHead*>(page_head + 1) + 1;
+        }
+    }
+
+    return nullptr;
+}
+void* woomem_validate_addr_head(void* ptr_may_invalid)
+{
+    if ((reinterpret_cast<intptr_t>(ptr_may_invalid) & 0b0111) == 0)
+    {
+        return woomem_validate_addr(ptr_may_invalid);
+    }
+    return nullptr;
+}
