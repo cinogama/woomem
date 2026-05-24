@@ -1,6 +1,8 @@
 #include "woomem_page.hpp"
 #include "woomem_page_unit_alloc.hpp"
 
+#include "woomem_global_context.hpp"
+
 namespace woomem
 {
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type)
@@ -40,5 +42,7 @@ namespace woomem
             unit->m_life.store(UnitLife::RELEASED, std::memory_order::memory_order_relaxed);
             unit->m_attribute = 0;
         }
+
+        g_global_context.add_page_into_chain(page);
     }
 }

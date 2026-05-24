@@ -141,6 +141,8 @@ namespace woomem
     {
         assert(base_ != nullptr);
 
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+
         if (order > max_order_)
             return nullptr;
 
@@ -242,6 +244,8 @@ namespace woomem
         assert(base_ != nullptr
             && page != nullptr
             && validate(page) != nullptr);
+
+        std::shared_lock<std::shared_mutex> lock(mutex_);
 
         size_t idx = page_to_index(page);
         uint8_t s = state_[idx].load(std::memory_order_acquire);
@@ -350,7 +354,7 @@ namespace woomem
     {
         assert(base_ != nullptr);
 
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::shared_mutex> lock(mutex_);
 
         for (size_t order = 0; order < max_order_; ++order)
         {

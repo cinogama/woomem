@@ -77,11 +77,7 @@ namespace woomem
 
     PageHead* GlobalContext::allocate_huge_page(size_t size)
     {
-        PageHead* const huge_page = m_chunk.allocate_huge_page(size);
-        if (huge_page != nullptr)
-            add_page_into_chain(huge_page);
-
-        return huge_page;
+        return m_chunk.allocate_huge_page(size);
     }
 
     GlobalContext g_global_context;

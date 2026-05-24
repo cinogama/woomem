@@ -31,12 +31,13 @@ void woomem_trigger_gc(bool async);
 
 void* woomem_allocate_begin(size_t size)
 {
-    //if (size <= MAX_IN_PAGE_UNIT_SIZE)
-    //    return t_thread_context.m_thread_page_collection.pick_unit_in_page(size) + 1;
-    //
-    //g_global_context.m_global_page_collection.
-
+    if (size <= MAX_IN_PAGE_UNIT_SIZE)
+        return t_thread_context.m_thread_page_collection.pick_unit_in_page(size) + 1;
     
+    PageHead* const huge_unit_page = 
+        g_global_context.allocate_huge_page(sizeof(PageHead) + sizeof(UnitHead) + size);
+
+    return reinterpret_cast<UnitHead*>(huge_unit_page + 1) + 1;
 }
 void woomem_allocate_end(void* p, int attrib);
 void* woomem_reallocate(void* ptr, size_t size);
