@@ -9,7 +9,7 @@ namespace woomem
     ThreadContext::ThreadContext()
         : m_thread_page_collection(
             g_global_context.m_globalcontext_inited
-            ? &g_global_context.m_global_page_collection
+            ? &g_global_context.gpc()
             : nullptr)
     {
         if (g_gc_ctx != nullptr)

@@ -110,7 +110,7 @@ void* woomem_reallocate(void* ptr, size_t size)
 
 void* woomem_validate_addr(void* ptr_may_invalid)
 {
-    PageHead* const page_head = g_global_context.m_chunk.validate(ptr_may_invalid);
+    PageHead* const page_head = g_global_context.chunk().validate(ptr_may_invalid);
     if (page_head != nullptr 
         && page_head->m_page_just_allocated.load(std::memory_order::memory_order_acquire))
     {

@@ -2,6 +2,7 @@
 
 #include "woomem.h"
 
+#include <atomic>
 #include <thread>
 #include <condition_variable>
 

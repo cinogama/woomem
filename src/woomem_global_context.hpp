@@ -14,15 +14,6 @@ namespace woomem
     class GlobalContext
     {
     public:
-        union
-        {
-            char __keep__;
-            struct
-            {
-                Chunk m_chunk;
-                GlobalPageCollection m_global_page_collection;
-            };
-        };
         bool m_globalcontext_alive;
         bool m_globalcontext_inited;
 
@@ -43,6 +34,15 @@ namespace woomem
 
         void add_page_into_chain(PageHead* page);
         PageHead* allocate_huge_page(size_t size);
+
+        Chunk& chunk() { return reinterpret_cast<Chunk&>(m_chunk_storage); }
+        const Chunk& chunk() const { return reinterpret_cast<const Chunk&>(m_chunk_storage); }
+        GlobalPageCollection& gpc() { return reinterpret_cast<GlobalPageCollection&>(m_gpc_storage); }
+        const GlobalPageCollection& gpc() const { return reinterpret_cast<const GlobalPageCollection&>(m_gpc_storage); }
+
+    private:
+        alignas(Chunk) char m_chunk_storage[sizeof(Chunk)];
+        alignas(GlobalPageCollection) char m_gpc_storage[sizeof(GlobalPageCollection)];
     };
 
     extern GlobalContext g_global_context;

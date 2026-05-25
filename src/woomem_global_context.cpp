@@ -7,7 +7,8 @@
 namespace woomem
 {
     GlobalContext::GlobalContext()
-        : __keep__{}
+        : m_chunk_storage{}
+        , m_gpc_storage{}
         , m_globalcontext_alive(true)
         , m_globalcontext_inited(false)
     {}
@@ -22,13 +23,13 @@ namespace woomem
     {
         assert(!m_globalcontext_inited);
 
-        (void)new (&m_chunk) Chunk(reserved_chunk_size);
-        if (m_chunk.is_init_failed())
+        (void)new (&chunk()) Chunk(reserved_chunk_size);
+        if (chunk().is_init_failed())
         {
-            m_chunk.~Chunk();
+            chunk().~Chunk();
             return false;
         }
-        (void)new (&m_global_page_collection) GlobalPageCollection(&m_chunk);
+        (void)new (&gpc()) GlobalPageCollection(&chunk());
         m_globalcontext_inited = true;
 
         do
@@ -37,7 +38,7 @@ namespace woomem
             for (auto* thread_ctx : m_thread_entries)
             {
                 thread_ctx->m_thread_page_collection.init_manually(
-                    &m_global_page_collection);
+                    &gpc());
             }
         } while (0);
 
@@ -57,8 +58,8 @@ namespace woomem
             }
         } while (0);
 
-        m_global_page_collection.~GlobalPageCollection();
-        m_chunk.~Chunk();
+        gpc().~GlobalPageCollection();
+        chunk().~Chunk();
 
         m_globalcontext_inited = false;
     }
@@ -83,7 +84,7 @@ namespace woomem
 
     PageHead* GlobalContext::allocate_huge_page(size_t size)
     {
-        return m_chunk.allocate_huge_page(size);
+        return chunk().allocate_huge_page(size);
     }
 
     GlobalContext g_global_context;
