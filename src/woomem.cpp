@@ -89,6 +89,8 @@ void woomem_allocate_end(void* p, int attrib)
     UnitHead* const unit_head =
         reinterpret_cast<UnitHead*>(p) - 1;
 
+    unit_head->m_age = 15;
+    unit_head->m_timing = woomem_gc_marking_round_counter;
     unit_head->m_attribute = static_cast<uint8_t>(attrib);
     unit_head->m_life.store(UnitLife::UNMARKED, std::memory_order::memory_order_release);
 }
