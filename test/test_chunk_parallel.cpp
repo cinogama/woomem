@@ -464,7 +464,6 @@ TEST(near_exhaustion_thrash)
                     successes.fetch_add(1, std::memory_order_relaxed);
                 }
             }
-
             for (int i = 0; i < allocated; i++)
             {
                 if (pages[i] != nullptr)

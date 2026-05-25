@@ -1,8 +1,10 @@
 #pragma once
 
 #include "woomem.h"
+#include "woomem_mpsc_queue.hpp"
 
 #include <atomic>
+#include <vector>
 #include <thread>
 #include <condition_variable>
 
@@ -14,6 +16,12 @@ namespace woomem
     class GCWorker
     {
         GC* m_gc_ctx;
+
+        static constexpr size_t GRAY_QUEUE_CAPACITY = 8192;
+        MpscGrayQueue<GRAY_QUEUE_CAPACITY> m_gray_queue;
+
+        std::vector<UnitHead*> m_local_work;
+        std::vector<UnitHead*> m_drain_buf;
 
         std::thread m_gc_worker_thread;
     public:
@@ -27,6 +35,10 @@ namespace woomem
 
     public:
         void mark_unit_to_gray(UnitHead* unit_head);
+
+    private:
+        void process_gray_units();
+        void drain_queue_into_local();
 
     public:
         void worker_thread_job();

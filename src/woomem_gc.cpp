@@ -1,6 +1,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
+#include <cstdlib>
 
 #include "woomem_gc.hpp"
 #include "woomem_global_context.hpp"
@@ -145,6 +146,9 @@ namespace woomem
     GCWorker::GCWorker(GC* gc_ctx)
         : m_gc_ctx(gc_ctx)
     {
+        m_local_work.reserve(GRAY_QUEUE_CAPACITY);
+        m_drain_buf.resize(GRAY_QUEUE_CAPACITY);
+
         m_gc_worker_thread = std::thread(&GCWorker::worker_thread_job, this);
     }
     GCWorker::~GCWorker()
@@ -161,8 +165,39 @@ namespace woomem
             std::memory_order::memory_order_release,
             std::memory_order::memory_order_relaxed))
         {
-            // Ok, this unit already marked.
-            // TODO;
+            if (std::this_thread::get_id() == m_gc_worker_thread.get_id())
+                m_local_work.push_back(unit_head);
+            else
+                m_gray_queue.enqueue(unit_head);
+        }
+    }
+    void GCWorker::drain_queue_into_local()
+    {
+        const size_t count = m_gray_queue.drain(
+            m_drain_buf.data(), m_drain_buf.size());
+        for (size_t i = 0; i < count; ++i)
+            m_local_work.push_back(m_drain_buf[i]);
+    }
+    void GCWorker::process_gray_units()
+    {
+        while (true)
+        {
+            if (m_local_work.empty())
+                drain_queue_into_local();
+            if (m_local_work.empty())
+                return;
+
+            UnitHead* const unit = m_local_work.back();
+            m_local_work.pop_back();
+
+            // TODO: scan children via user callback here,
+            //       which may call mark_unit_to_gray for each child.
+            //       Children discovered from the worker thread will
+            //       accumulate in m_local_work automatically.
+
+            unit->m_life.store(
+                UnitLife::FULL_MARKED,
+                std::memory_order::memory_order_release);
         }
     }
     void GCWorker::worker_thread_job()
@@ -171,10 +206,12 @@ namespace woomem
         {
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::PARALLEL_MARK);
             {
+                process_gray_units();
             }
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::FINAL_MARK);
             {
+                process_gray_units();
             }
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::SWEEP);
