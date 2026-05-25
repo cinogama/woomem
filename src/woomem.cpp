@@ -14,16 +14,39 @@ using namespace woomem;
 
 bool woomem_init(
     size_t reserved_chunk_size,
+    woomem_GCCallback gc_callback_at_begin,
+    woomem_GCCallback gc_callback_at_stop_marking,
+    woomem_GCCallback gc_callback_at_mark_end,
     woomem_MarkCallback mark_callback,
-    woomem_FreeCallback free_callback,
-    woomem_GCCallback gc_callback_at_begin)
+    woomem_FreeCallback free_callback)
 {
-    assert(!g_global_context.m_globalcontext_inited);
-    return g_global_context.init(reserved_chunk_size);
+    assert(!g_global_context.m_globalcontext_inited && g_gc_ctx == nullptr);
+    if (g_global_context.init(reserved_chunk_size))
+    {
+        g_gc_ctx = reinterpret_cast<GC*>(malloc(sizeof(GC)));
+        if (g_gc_ctx != nullptr)
+        {
+            (void)new (g_gc_ctx)GC(
+                0, 
+                gc_callback_at_begin, 
+                gc_callback_at_stop_marking, 
+                gc_callback_at_mark_end, 
+                mark_callback, 
+                free_callback);
+            return true;
+        }
+        g_global_context.shutdown();
+    }
+    return false;
 }
 void woomem_shutdown(void)
 {
     g_global_context.shutdown();
+
+    g_gc_ctx->~GC();
+    free(g_gc_ctx);
+
+    g_gc_ctx = nullptr;
 }
 
 // ======================================================================
@@ -91,16 +114,16 @@ void* woomem_reallocate(void* ptr, size_t size)
 void* woomem_validate_addr(void* ptr_may_invalid)
 {
     PageHead* const page_head = g_global_context.chunk().validate(ptr_may_invalid);
-    if (page_head != nullptr 
+    if (page_head != nullptr
         && page_head->m_page_just_allocated.load(std::memory_order::memory_order_acquire))
     {
         UnitHead* unit_head;
         if (page_head->m_page_count_if_huge == 0)
         {
-            PageUnitAlloc* const page_alloc_head = 
+            PageUnitAlloc* const page_alloc_head =
                 reinterpret_cast<PageUnitAlloc*>(page_head + 1);
 
-            const size_t unit_size_with_head = 
+            const size_t unit_size_with_head =
                 page_alloc_head->m_unit_size_in_page + sizeof(UnitHead);
 
             const uintptr_t addr = reinterpret_cast<uintptr_t>(ptr_may_invalid);

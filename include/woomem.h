@@ -28,9 +28,11 @@ typedef void (*woomem_GCCallback)(void);
 
 bool woomem_init(
     size_t reserved_chunk_size,
+    woomem_GCCallback gc_callback_at_begin,
+    woomem_GCCallback gc_callback_at_stop_marking,
+    woomem_GCCallback gc_callback_at_mark_end,
     woomem_MarkCallback mark_callback,
-    woomem_FreeCallback free_callback,
-    woomem_GCCallback gc_callback_at_begin);
+    woomem_FreeCallback free_callback);
 void woomem_shutdown(void);
 
 void woomem_trigger_gc(bool async);

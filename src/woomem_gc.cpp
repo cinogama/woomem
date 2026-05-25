@@ -13,6 +13,8 @@ bool woomem_gc_marking_state_flag = false;
 
 namespace woomem
 {
+    GC* g_gc_ctx = nullptr;
+
     static size_t default_gc_worker_count(void)
     {
         const size_t count = std::thread::hardware_concurrency() / 8;
@@ -23,12 +25,16 @@ namespace woomem
         size_t worker_count,
         woomem_GCCallback callback_for_marking_root,
         woomem_GCCallback callback_stop_marking,
-        woomem_GCCallback callback_mark_end)
+        woomem_GCCallback callback_mark_end,
+        woomem_MarkCallback user_mark_callback,
+        woomem_FreeCallback user_free_callback)
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
         , m_gc_assigned_thread_idx{}
         , m_gc_callback_at_begin(callback_for_marking_root)
         , m_gc_callback_at_stop_marking(callback_stop_marking)
         , m_gc_callback_at_end(callback_mark_end)
+        , m_user_mark_callback(user_mark_callback)
+        , m_user_free_callback(user_free_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
         , m_gc_worker_threshold_finish_counter(0)
     {
