@@ -32,16 +32,16 @@ namespace woomem
         woomem_FreeCallback user_free_callback)
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
         , m_gc_assigned_thread_idx{}
-        , m_shutdown{false}
+        , m_shutdown{ false }
         , m_gc_callback_at_begin(callback_for_marking_root)
         , m_gc_callback_at_stop_marking(callback_stop_marking)
         , m_user_mark_callback(user_mark_callback)
         , m_user_free_callback(user_free_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
         , m_gc_worker_threshold_finish_counter(0)
-        , m_force_trigger_gc{false}
-        , m_gc_cycle_count{0}
-        , m_new_allocated_size_since_last_gc{0}
+        , m_force_trigger_gc{ false }
+        , m_gc_cycle_count{ 0 }
+        , m_new_allocated_size_since_last_gc{ 0 }
     {
         m_gc_worker_threads = (GCWorker*)malloc(m_gc_worker_count * sizeof(GCWorker));
         if (m_gc_worker_threads == nullptr)
@@ -156,7 +156,7 @@ namespace woomem
 
             std::lock_guard g(worker.m_local_work_spin_for_root);
             worker.m_local_work.push_back(unit_head);
-        }        
+        }
     }
     GCWorker* GC::fetch_thread_worker()
     {
@@ -181,10 +181,10 @@ namespace woomem
 
             std::unique_lock ug(m_trigger_mx);
             m_trigger_cv.wait(ug, [this, prev_count]()
-            {
-                return m_gc_cycle_count.load(std::memory_order_acquire) > prev_count
-                    || m_shutdown.load(std::memory_order_acquire);
-            });
+                {
+                    return m_gc_cycle_count.load(std::memory_order_acquire) > prev_count
+                        || m_shutdown.load(std::memory_order_acquire);
+                });
         }
     }
     void GC::main_thread_job()
@@ -204,10 +204,10 @@ namespace woomem
                     {
                         std::unique_lock ug(m_trigger_mx);
                         m_trigger_cv.wait_for(ug, 0.1s, [this]()
-                        {
-                            return m_force_trigger_gc.load(std::memory_order_relaxed)
-                                || m_shutdown.load(std::memory_order_acquire);
-                        });
+                            {
+                                return m_force_trigger_gc.load(std::memory_order_relaxed)
+                                    || m_shutdown.load(std::memory_order_acquire);
+                            });
                     }
 
                     if (m_shutdown.load(std::memory_order_acquire))
@@ -294,7 +294,7 @@ namespace woomem
             size_t total_alive_memory_size = 0;
             for (size_t i = 0; i < m_gc_worker_count; ++i)
             {
-                total_alive_memory_size += 
+                total_alive_memory_size +=
                     m_gc_worker_threads[i].m_alive_memory_size_counter;
             }
             woomem_gc_memory_size_after_last_round_sweep = total_alive_memory_size;
@@ -404,7 +404,7 @@ namespace woomem
                 ; // drop_page = true;
             else
             {
-                m_alive_memory_size_counter += 
+                m_alive_memory_size_counter +=
                     sizeof(PageHead) + sizeof(PageUnitAlloc);
             }
         }
@@ -458,18 +458,17 @@ namespace woomem
             assert(SELF_MARKED == unit->m_life.load(
                 std::memory_order::memory_order_relaxed));
 
-            void* const unit_in_mark = unit + 1;
-
             if (unit->m_attribute & WOOMEM_ATTRIB_MARK_CALLBACK)
             {
-                m_gc_ctx->callback_user_mark(unit_in_mark);
+                m_gc_ctx->callback_user_mark(unit + 1);
             }
             if (unit->m_attribute & WOOMEM_ATTRIB_AUTO_MARK)
             {
-                const size_t unit_size = unit->get_unit_available_size();
+                const size_t auto_mark_step = 
+                    unit->get_unit_available_size() / sizeof(void*);
 
                 void** const p = reinterpret_cast<void**>(unit + 1);
-                for (size_t i = 0; i < unit_size; ++i)
+                for (size_t i = 0; i < auto_mark_step; ++i)
                     woomem_mark_fuzzy_unit(p[i]);
             }
 
