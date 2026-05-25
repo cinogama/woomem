@@ -870,7 +870,6 @@ TEST(sequential_after_parallel)
     for (int i = 0; i < 128; i++)
         chunk.free_page(pages[i]);
 
-    chunk.defragment();
     PageHead* huge = chunk.allocate_huge_page(128 * kPageSize);
     CHECK(huge != nullptr);
     chunk.free_page(huge);

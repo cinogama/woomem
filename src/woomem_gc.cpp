@@ -162,7 +162,7 @@ namespace woomem
             std::memory_order::memory_order_relaxed))
         {
             // Ok, this unit already marked.
-            TODO;
+            // TODO;
         }
     }
     void GCWorker::worker_thread_job()

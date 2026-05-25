@@ -213,7 +213,6 @@ TEST(buddy_coalesce_all_to_max_order)
     }
     for (int i = 0; i < 32; i++)
         chunk.free_page(pages[i]);
-    chunk.defragment();
     PageHead* huge = chunk.allocate_huge_page(32 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(huge != nullptr);
     chunk.free_page(huge);
@@ -228,7 +227,6 @@ TEST(buddy_coalesce_to_order_1)
     CHECK(p1 != nullptr);
     chunk.free_page(p0);
     chunk.free_page(p1);
-    chunk.defragment();
     PageHead* p2 = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
     chunk.free_page(p2);
@@ -243,7 +241,6 @@ TEST(buddy_no_coalesce_when_still_allocated)
     CHECK(p1 != nullptr);
     CHECK_EQ(p1, reinterpret_cast<PageHead*>(reinterpret_cast<char*>(p0) + PageHead::NORMAL_PAGE_SIZE));
     chunk.free_page(p1);
-    chunk.defragment();
     PageHead* p2 = chunk.allocate_huge_page(2 * PageHead::NORMAL_PAGE_SIZE);
     CHECK(p2 != nullptr);
     CHECK_NE(p2, p0);

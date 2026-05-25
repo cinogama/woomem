@@ -1,4 +1,3 @@
-#include "woomem.h"
 #include "woomem_os_mmap.h"
 
 #include "woomem_chunk.hpp"
@@ -29,21 +28,6 @@ namespace woomem
         return r;
     }
 
-    uint64_t Chunk::pack(uint32_t index, uint32_t counter)
-    {
-        return (static_cast<uint64_t>(counter) << 32) | index;
-    }
-
-    uint32_t Chunk::unpack_index(uint64_t packed)
-    {
-        return static_cast<uint32_t>(packed & 0xFFFFFFFFULL);
-    }
-
-    uint32_t Chunk::unpack_counter(uint64_t packed)
-    {
-        return static_cast<uint32_t>(packed >> 32);
-    }
-
     size_t Chunk::page_to_index(PageHead* page) const
     {
         return static_cast<size_t>(
@@ -68,6 +52,15 @@ namespace woomem
     }
 
     Chunk::Chunk(size_t reserved_size)
+        : base_(nullptr)
+        , reserved_size_(0)
+        , total_pages_(0)
+        , max_order_(0)
+        , state_(nullptr)
+        , prev_(nullptr)
+        , next_(nullptr)
+        , free_heads_(nullptr)
+        , commit_(nullptr)
     {
         size_t num_pages =
             (reserved_size + PageHead::NORMAL_PAGE_SIZE - 1) /
@@ -82,51 +75,42 @@ namespace woomem
             total_pages_ = 0;
             max_order_ = 0;
             reserved_size_ = 0;
-            state_ = nullptr;
-            links_ = nullptr;
-            free_lists_ = nullptr;
-            commit_ = nullptr;
             return;
         }
-        state_ = new std::atomic<uint8_t>[total_pages_];
-        links_ = new std::atomic<uint64_t>[total_pages_];
-        free_lists_ = new std::atomic<uint64_t>[max_order_ + 1];
-        commit_ = new std::atomic<uint8_t>[total_pages_];
+
+        state_ = new uint8_t[total_pages_];
+        prev_  = new uint32_t[total_pages_];
+        next_  = new uint32_t[total_pages_];
+        free_heads_ = new uint32_t[max_order_ + 1];
+        commit_ = new uint8_t[total_pages_];
+
+        memset(state_, 0, total_pages_);
+        memset(commit_, 0, total_pages_);
 
         for (size_t i = 0; i < total_pages_; ++i)
         {
-            state_[i].store(0, std::memory_order_relaxed);
-            links_[i].store(PACKED_NULL, std::memory_order_relaxed);
-            commit_[i].store(0, std::memory_order_relaxed);
+            prev_[i] = INDEX_NULL;
+            next_[i] = INDEX_NULL;
         }
 
         for (size_t i = 0; i <= max_order_; ++i)
         {
-            free_lists_[i].store(PACKED_NULL, std::memory_order_relaxed);
+            free_heads_[i] = INDEX_NULL;
         }
 
-        state_[0].store(
-            static_cast<uint8_t>(max_order_ << STATE_ORDER_SHIFT),
-            std::memory_order_release);
+        state_[0] = static_cast<uint8_t>(max_order_ << STATE_ORDER_SHIFT);
 
-        uint64_t old_head =
-            free_lists_[max_order_].load(std::memory_order_acquire);
-        uint64_t new_head;
-        do
-        {
-            links_[0].store(old_head, std::memory_order_release);
-            new_head = pack(0, unpack_counter(old_head) + 1);
-        } while (!free_lists_[max_order_].compare_exchange_weak(
-            old_head, new_head,
-            std::memory_order_release,
-            std::memory_order_acquire));
+        free_heads_[max_order_] = 0;
+        prev_[0] = INDEX_NULL;
+        next_[0] = INDEX_NULL;
     }
 
     Chunk::~Chunk()
     {
         delete[] state_;
-        delete[] links_;
-        delete[] free_lists_;
+        delete[] prev_;
+        delete[] next_;
+        delete[] free_heads_;
         delete[] commit_;
         if (base_)
         {
@@ -141,103 +125,106 @@ namespace woomem
 
     PageHead* Chunk::commit_page(size_t idx)
     {
-        PageHead* const commiting_page = index_to_page(idx);
-
-        // NOTE: No need to CAS, one page cannot be commit same time in different threads.
-        if (commit_[idx].load(std::memory_order_relaxed) == 0)
+        PageHead* const p = index_to_page(idx);
+        if (!commit_[idx])
         {
-            woomem_os_commit_memory(
-                commiting_page,
-                PageHead::NORMAL_PAGE_SIZE);
-            commit_[idx].store(1, std::memory_order_relaxed);
+            woomem_os_commit_memory(p, PageHead::NORMAL_PAGE_SIZE);
+            commit_[idx] = 1;
         }
-        return commiting_page;
+        return p;
+    }
+
+    void Chunk::push_free(size_t order, uint32_t idx)
+    {
+        uint32_t head = free_heads_[order];
+        free_heads_[order] = idx;
+        prev_[idx] = INDEX_NULL;
+        next_[idx] = head;
+        if (head != INDEX_NULL)
+        {
+            prev_[head] = idx;
+        }
+    }
+
+    uint32_t Chunk::pop_free(size_t order)
+    {
+        uint32_t head = free_heads_[order];
+        if (head == INDEX_NULL)
+            return INDEX_NULL;
+
+        uint32_t succ = next_[head];
+        free_heads_[order] = succ;
+        if (succ != INDEX_NULL)
+        {
+            prev_[succ] = INDEX_NULL;
+        }
+        prev_[head] = INDEX_NULL;
+        next_[head] = INDEX_NULL;
+        return head;
+    }
+
+    void Chunk::remove_free(size_t order, uint32_t idx)
+    {
+        uint32_t p = prev_[idx];
+        uint32_t n = next_[idx];
+
+        if (p == INDEX_NULL)
+        {
+            free_heads_[order] = n;
+        }
+        else
+        {
+            next_[p] = n;
+        }
+
+        if (n != INDEX_NULL)
+        {
+            prev_[n] = p;
+        }
+
+        prev_[idx] = INDEX_NULL;
+        next_[idx] = INDEX_NULL;
     }
 
     PageHead* Chunk::allocate_block(size_t order)
     {
         assert(base_ != nullptr);
 
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (order > max_order_)
-            return nullptr;
+        ReadWriteSpinlock::WriteGuard guard(rwlock_);
 
         for (size_t k = order; k <= max_order_; ++k)
         {
-            uint64_t old_head =
-                free_lists_[k].load(std::memory_order_acquire);
-            while (old_head != PACKED_NULL)
+            if (free_heads_[k] == INDEX_NULL)
+                continue;
+
+            uint32_t idx = pop_free(k);
+
+            while (k > order)
             {
-                uint32_t idx = unpack_index(old_head);
-                uint64_t next = links_[idx].load(std::memory_order_acquire);
-                uint64_t new_head;
-
-                if (next == PACKED_NULL)
-                {
-                    new_head = PACKED_NULL;
-                }
-                else
-                {
-                    new_head = pack(
-                        unpack_index(next),
-                        unpack_counter(old_head) + 1);
-                }
-
-                if (free_lists_[k].compare_exchange_weak(
-                    old_head, new_head,
-                    std::memory_order_release,
-                    std::memory_order_acquire))
-                {
-                    while (k > order)
-                    {
-                        --k;
-                        size_t buddy = idx + (size_t(1) << k);
-
-                        state_[buddy].store(
-                            static_cast<uint8_t>(k << STATE_ORDER_SHIFT),
-                            std::memory_order_release);
-
-                        uint64_t old_fl =
-                            free_lists_[k].load(std::memory_order_acquire);
-                        uint64_t new_fl;
-                        do
-                        {
-                            links_[buddy].store(
-                                old_fl, std::memory_order_release);
-                            new_fl = pack(
-                                static_cast<uint32_t>(buddy),
-                                unpack_counter(old_fl) + 1);
-                        } while (!free_lists_[k].compare_exchange_weak(
-                            old_fl, new_fl,
-                            std::memory_order_release,
-                            std::memory_order_acquire));
-                    }
-
-                    const size_t block_pages = size_t(1) << order;
-
-                    PageHead* const page = commit_page(idx);
-                    page->m_page_just_allocated.store(
-                        true, std::memory_order::memory_order_relaxed);
-
-                    state_[idx].store(
-                        static_cast<uint8_t>(
-                            (order << STATE_ORDER_SHIFT) | STATE_ALLOCATED),
-                        std::memory_order_release);
-
-                    for (size_t j = 1; j < block_pages; ++j)
-                    {
-                        const size_t page_index = idx + j;
-
-                        (void)commit_page(page_index);
-                        state_[page_index].store(
-                            STATE_CONTINUATION, std::memory_order_release);
-                    }
-
-                    return page;
-                }
+                --k;
+                size_t buddy = idx + (size_t(1) << k);
+                state_[buddy] = static_cast<uint8_t>(k << STATE_ORDER_SHIFT);
+                push_free(k, static_cast<uint32_t>(buddy));
             }
+
+            const size_t block_pages = size_t(1) << order;
+
+            PageHead* const page = commit_page(idx);
+            page->m_page_just_allocated.store(
+                true, std::memory_order_relaxed);
+
+            state_[idx] = static_cast<uint8_t>(
+                (order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
+
+            for (size_t j = 1; j < block_pages; ++j)
+            {
+                (void)commit_page(idx + j);
+                state_[idx + j] = STATE_CONTINUATION;
+            }
+
+            return page;
         }
+
         return nullptr;
     }
 
@@ -270,38 +257,47 @@ namespace woomem
             && page != nullptr
             && validate(page) != nullptr);
 
-        std::shared_lock<std::shared_mutex> lock(mutex_);
+        ReadWriteSpinlock::WriteGuard guard(rwlock_);
 
         size_t idx = page_to_index(page);
-        uint8_t s = state_[idx].load(std::memory_order_acquire);
+        uint8_t s = state_[idx];
 
         if (!(s & STATE_ALLOCATED)) return;
 
         size_t order = s >> STATE_ORDER_SHIFT;
         size_t block_pages = size_t(1) << order;
 
-        state_[idx].store(
-            static_cast<uint8_t>(order << STATE_ORDER_SHIFT),
-            std::memory_order_release);
+        state_[idx] = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
 
         for (size_t j = 1; j < block_pages; ++j)
         {
-            state_[idx + j].store(0, std::memory_order_release);
+            state_[idx + j] = 0;
         }
 
-        uint64_t old_head =
-            free_lists_[order].load(std::memory_order_acquire);
-        uint64_t new_head;
-        do
+        while (order < max_order_)
         {
-            links_[idx].store(old_head, std::memory_order_release);
-            new_head = pack(
-                static_cast<uint32_t>(idx),
-                unpack_counter(old_head) + 1);
-        } while (!free_lists_[order].compare_exchange_weak(
-            old_head, new_head,
-            std::memory_order_release,
-            std::memory_order_acquire));
+            size_t block_size = size_t(1) << order;
+            size_t buddy = idx ^ block_size;
+
+            if (buddy >= total_pages_)
+                break;
+
+            uint8_t bs = state_[buddy];
+            if ((bs & STATE_ALLOCATED) != 0)
+                break;
+            if ((bs >> STATE_ORDER_SHIFT) != order)
+                break;
+
+            remove_free(order, static_cast<uint32_t>(buddy));
+
+            state_[buddy] = 0;
+
+            idx = idx < buddy ? idx : buddy;
+            ++order;
+        }
+
+        state_[idx] = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
+        push_free(order, static_cast<uint32_t>(idx));
     }
 
     PageHead* Chunk::validate(void* ptr)
@@ -316,11 +312,13 @@ namespace woomem
 
         size_t idx = (addr - base_addr) / PageHead::NORMAL_PAGE_SIZE;
 
+        ReadWriteSpinlock::ReadGuard guard(rwlock_);
+
         for (size_t order = 0; order <= max_order_; ++order)
         {
             size_t block_size = size_t(1) << order;
             size_t candidate = idx & ~(block_size - 1);
-            uint8_t s = state_[candidate].load(std::memory_order_acquire);
+            uint8_t s = state_[candidate];
 
             if ((s & STATE_ALLOCATED) &&
                 (static_cast<size_t>(s >> STATE_ORDER_SHIFT) == order))
@@ -330,106 +328,6 @@ namespace woomem
         }
 
         return nullptr;
-    }
-
-    void Chunk::remove_from_free_list_defrag(
-        size_t order, uint32_t target)
-    {
-        uint64_t prev = PACKED_NULL;
-        uint64_t curr =
-            free_lists_[order].load(std::memory_order_acquire);
-
-        while (curr != PACKED_NULL)
-        {
-            uint32_t curr_idx = unpack_index(curr);
-            if (curr_idx == target)
-            {
-                uint64_t next =
-                    links_[curr_idx].load(std::memory_order_acquire);
-
-                if (prev == PACKED_NULL)
-                {
-                    if (next == PACKED_NULL)
-                    {
-                        free_lists_[order].store(
-                            PACKED_NULL, std::memory_order_release);
-                    }
-                    else
-                    {
-                        free_lists_[order].store(
-                            pack(unpack_index(next),
-                                unpack_counter(curr) + 1),
-                            std::memory_order_release);
-                    }
-                }
-                else
-                {
-                    links_[unpack_index(prev)].store(
-                        next, std::memory_order_release);
-                }
-                links_[curr_idx].store(PACKED_NULL, std::memory_order_release);
-                return;
-            }
-            prev = curr;
-            curr = links_[curr_idx].load(std::memory_order_acquire);
-        }
-    }
-
-    void Chunk::defragment()
-    {
-        assert(base_ != nullptr);
-
-        std::lock_guard<std::shared_mutex> lock(mutex_);
-
-        for (size_t order = 0; order < max_order_; ++order)
-        {
-            size_t step = size_t(1) << (order + 1);
-            size_t block_size = size_t(1) << order;
-
-            for (size_t i = 0;
-                i + block_size * 2 <= total_pages_;
-                i += step)
-            {
-                size_t buddy = i + block_size;
-
-                uint8_t s1 = state_[i].load(std::memory_order_relaxed);
-                uint8_t s2 = state_[buddy].load(std::memory_order_relaxed);
-
-                if ((s1 & STATE_ALLOCATED) || (s2 & STATE_ALLOCATED))
-                    continue;
-                if ((s1 >> STATE_ORDER_SHIFT) != order)
-                    continue;
-                if ((s2 >> STATE_ORDER_SHIFT) != order)
-                    continue;
-
-                remove_from_free_list_defrag(
-                    order, static_cast<uint32_t>(i));
-                remove_from_free_list_defrag(
-                    order, static_cast<uint32_t>(buddy));
-
-                state_[i].store(0, std::memory_order_relaxed);
-                state_[buddy].store(0, std::memory_order_relaxed);
-
-                state_[i].store(
-                    static_cast<uint8_t>(
-                        (order + 1) << STATE_ORDER_SHIFT),
-                    std::memory_order_release);
-
-                uint64_t old_head =
-                    free_lists_[order + 1].load(std::memory_order_acquire);
-                uint64_t new_head;
-                do
-                {
-                    links_[i].store(old_head, std::memory_order_release);
-                    new_head = pack(
-                        static_cast<uint32_t>(i),
-                        unpack_counter(old_head) + 1);
-                } while (!free_lists_[order + 1].compare_exchange_weak(
-                    old_head, new_head,
-                    std::memory_order_release,
-                    std::memory_order_acquire));
-            }
-        }
     }
 
     size_t Chunk::get_total_size() const
