@@ -73,6 +73,10 @@ namespace woomem
             PageHead* page = m_free_pages[group].pick_free_page();
             if (page != nullptr)
             {
+                assert(page->m_page_count_if_huge == 0
+                    && reinterpret_cast<PageUnitAlloc*>(page + 1)->m_run_out == false
+                    && reinterpret_cast<PageUnitAlloc*>(page + 1)->m_unit_size_in_page == GROUP_SIZE_LOOKUP_TABLE[group]);
+
                 return page;
             }
 

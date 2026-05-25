@@ -143,13 +143,13 @@ namespace woomem
                 WOOMEM_FAST_LOOKUP_GROUP_INDEX(unit_size)];
         else
         {
-            if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_2720])
+            if (unit_size <= GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_2720])
                 return UnitAllocGroup::MIDIUM_2720;
-            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_5448])
+            else if (unit_size <= GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_5448])
                 return UnitAllocGroup::MIDIUM_5448;
-            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_8176])
+            else if (unit_size <= GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_8176])
                 return UnitAllocGroup::MIDIUM_8176;
-            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_10904])
+            else if (unit_size <= GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_10904])
                 return UnitAllocGroup::MIDIUM_10904;
             else
                 return UnitAllocGroup::MIDIUM_16360;
