@@ -44,7 +44,7 @@ namespace woomem
 
     public:
         void mark_unit_to_gray(UnitHead* unit_head);
-        bool check_and_free_unmarked_unit(UnitHead* unit);
+        bool check_and_free_unmarked_unit(UnitHead* unit, PageHead* page_may_null);
         void sweep_units_in_page(PageHead* page);
 
     private:

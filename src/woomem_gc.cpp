@@ -334,7 +334,7 @@ namespace woomem
                 m_gray_queue.enqueue(unit_head);
         }
     }
-    bool GCWorker::check_and_free_unmarked_unit(UnitHead* unit)
+    bool GCWorker::check_and_free_unmarked_unit(UnitHead* unit, PageHead* page_may_null)
     {
         const uint8_t life = unit->m_life.load(std::memory_order::memory_order_relaxed);
 
@@ -354,6 +354,9 @@ namespace woomem
             unit->m_life.store(
                 UnitLife::RELEASED,
                 std::memory_order::memory_order_relaxed);
+
+            if (page_may_null != nullptr)
+                drop_freed_unit_into_page(page_may_null, unit);
 
             return false;
         }
@@ -392,13 +395,15 @@ namespace woomem
                 UnitHead* unit =
                     reinterpret_cast<UnitHead*>(unit_storage + i * unit_size_with_head);
 
-                if (check_and_free_unmarked_unit(unit))
+                if (unit->m_life.load(std::memory_order::memory_order_relaxed)
+                    == UnitLife::RELEASED)
+                    continue;
+
+                if (check_and_free_unmarked_unit(unit, page))
                 {
                     has_survivor = true;
                     m_alive_memory_size_counter += unit_size_with_head;
                 }
-                else
-                    drop_freed_unit_into_page(page, unit);
             }
             if (!has_survivor)
                 ; // drop_page = true;
@@ -411,7 +416,7 @@ namespace woomem
         else
         {
             // Is huge unit.
-            if (!check_and_free_unmarked_unit(reinterpret_cast<UnitHead*>(page + 1)))
+            if (!check_and_free_unmarked_unit(reinterpret_cast<UnitHead*>(page + 1), nullptr))
                 drop_page = true;
             else
             {
@@ -464,7 +469,7 @@ namespace woomem
             }
             if (unit->m_attribute & WOOMEM_ATTRIB_AUTO_MARK)
             {
-                const size_t auto_mark_step = 
+                const size_t auto_mark_step =
                     unit->get_unit_available_size() / sizeof(void*);
 
                 void** const p = reinterpret_cast<void**>(unit + 1);
