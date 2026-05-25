@@ -38,6 +38,7 @@ namespace woomem
         , m_user_free_callback(user_free_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
         , m_gc_worker_threshold_finish_counter(0)
+        , m_new_allocated_size_since_last_gc{0}
     {
         m_gc_worker_threads = (GCWorker*)malloc(m_gc_worker_count * sizeof(GCWorker));
         if (m_gc_worker_threads == nullptr)
@@ -128,9 +129,34 @@ namespace woomem
         using namespace std;
         do
         {
-            // Step 0: Wait.
-            // TODO: 使用更有价值的GC触发策略
-            std::this_thread::sleep_for(10s);
+            // Step 0: Wait with ratio-based early triggering.
+            {
+                static constexpr size_t GC_TRIGGER_NEW_ALLOC_RATIO_NUM = 1;
+                static constexpr size_t GC_TRIGGER_NEW_ALLOC_RATIO_DEN = 3;
+                static constexpr size_t GC_TRIGGER_MIN_EDGE = 1024 * 1024;
+
+                const auto cycle_start = chrono::steady_clock::now();
+                while (true)
+                {
+                    this_thread::sleep_for(1s);
+
+                    const auto elapsed = chrono::steady_clock::now() - cycle_start;
+                    if (elapsed >= 10s)
+                        break;
+
+                    const size_t alive =
+                        std::min(GC_TRIGGER_MIN_EDGE, woomem_gc_memory_size_after_last_round_sweep);
+
+                    const size_t new_alloc =
+                        m_new_allocated_size_since_last_gc.load(
+                            std::memory_order_relaxed);
+
+                    if (new_alloc * GC_TRIGGER_NEW_ALLOC_RATIO_DEN
+                        >= alive * GC_TRIGGER_NEW_ALLOC_RATIO_NUM)
+                        break;
+                }
+            }
+            m_new_allocated_size_since_last_gc.store(0, std::memory_order_relaxed);
 
             // Step 1: 更新 GC 轮次和 GC 状态
             ++woomem_gc_marking_round_counter;

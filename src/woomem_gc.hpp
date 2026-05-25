@@ -81,6 +81,9 @@ namespace woomem
         std::thread             m_gc_main_thread;
 
     public:
+        std::atomic<size_t>     m_new_allocated_size_since_last_gc;
+
+    public:
         GC(const GC&) = delete;
         GC& operator=(const GC&) = delete;
         GC(GC&&) = delete;

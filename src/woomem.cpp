@@ -55,8 +55,13 @@ void woomem_trigger_gc(bool async);
 
 void* woomem_allocate_begin(size_t size)
 {
+    assert(g_gc_ctx != nullptr);
+    g_gc_ctx->m_new_allocated_size_since_last_gc.fetch_add(size, std::memory_order_relaxed);
+
     if (size <= MAX_IN_PAGE_UNIT_SIZE)
+    {
         return t_thread_context.m_thread_page_collection.pick_unit_in_page(size);
+    }
 
     PageHead* const huge_unit_page =
         g_global_context.allocate_huge_page(sizeof(PageHead) + sizeof(UnitHead) + size);
@@ -73,6 +78,7 @@ void* woomem_allocate_begin(size_t size)
         std::memory_order::memory_order_relaxed);
 
     g_global_context.add_new_page_into_chain(huge_unit_page);
+
     return huge_unit_head + 1;
 }
 void woomem_allocate_end(void* p, int attrib)
