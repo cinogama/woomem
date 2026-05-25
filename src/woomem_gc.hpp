@@ -103,6 +103,9 @@ namespace woomem
             WorkerThresholdState expected_state);
         void wait_for_worker_launch(
             WorkerThresholdState expected_state);
+        bool wait_for_worker_launch_or_shutdown(
+            WorkerThresholdState expected_state);
+        void signal_worker_shutdown();
         void worker_done_and_notify_main_gc_thread();
 
         void callback_user_mark(void* unit);

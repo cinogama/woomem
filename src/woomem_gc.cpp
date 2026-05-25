@@ -102,6 +102,26 @@ namespace woomem
                 return expected_state == m_gc_worker_threshold_launch_state;
             });
     }
+    bool GC::wait_for_worker_launch_or_shutdown(
+        WorkerThresholdState expected_state)
+    {
+        std::unique_lock ug(m_gc_worker_threshold_mx);
+        m_gc_worker_threshold_cv.wait(
+            ug,
+            [this, expected_state]()
+            {
+                return expected_state == m_gc_worker_threshold_launch_state
+                    || m_shutdown.load(std::memory_order_acquire);
+            });
+        return !m_shutdown.load(std::memory_order_acquire);
+    }
+    void GC::signal_worker_shutdown()
+    {
+        {
+            std::lock_guard g(m_gc_worker_threshold_mx);
+        }
+        m_gc_worker_threshold_cv.notify_all();
+    }
     void GC::worker_done_and_notify_main_gc_thread()
     {
         std::lock_guard g(m_gc_worker_threshold_mx);
@@ -242,7 +262,7 @@ namespace woomem
     }
     GCWorker::~GCWorker()
     {
-        // TODO: Stop worker thread here.
+        m_gc_ctx->signal_worker_shutdown();
         m_gc_worker_thread.join();
     }
     void GCWorker::mark_unit_to_gray(
@@ -411,7 +431,9 @@ namespace woomem
     {
         do
         {
-            m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::PARALLEL_MARK);
+            if (!m_gc_ctx->wait_for_worker_launch_or_shutdown(GC::WorkerThresholdState::PARALLEL_MARK))
+                return;
+            else
             {
                 process_gray_units();
             }
