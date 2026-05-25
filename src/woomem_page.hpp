@@ -10,19 +10,9 @@ namespace woomem
     {
         static constexpr size_t NORMAL_PAGE_SIZE = 32768;
         // =================================================
-
-        union
-        {
-            struct
-            {
-                std::atomic_bool
-                            m_page_just_allocated;
-
-                size_t      m_page_count_if_huge;
-                PageHead*   m_next_page;
-            };
-            char __reserved__[24];
-        };
+        alignas(8) size_t       m_page_count_if_huge;
+        alignas(8) PageHead*    m_next_page;
+        std::atomic_bool        m_page_just_allocated;
     };
     static_assert(sizeof(PageHead) == 24);
 }
