@@ -239,11 +239,6 @@ namespace woomem
             ++woomem_gc_marking_round_counter;
             woomem_gc_marking_state_flag = true;
 
-            for (size_t i = 0; i < m_gc_worker_count; ++i)
-            {
-                m_gc_worker_threads[i].m_alive_memory_size_counter = 0;
-            }
-
             // Step 2: 触发 GC 起始回调，此阶段完成线程同步和根对象标记
             m_gc_callback_at_begin();
 
@@ -350,11 +345,11 @@ namespace woomem
 
         if (life == UnitLife::UNMARKED
             && (unit->m_age != 15 || unit->m_timing != woomem_gc_marking_round_counter)
-            && 0 == (unit->m_attribute & WOOMEM_ATTRIB_NEED_SWEEP))
+            && 0 != (unit->m_attribute & WOOMEM_ATTRIB_NEED_SWEEP))
         {
             // Drop it.
             if (unit->m_attribute & WOOMEM_ATTRIB_FREE_CALLBACK)
-                m_gc_ctx->callback_user_free(unit);
+                m_gc_ctx->callback_user_free(unit + 1);
 
             unit->m_life.store(
                 UnitLife::RELEASED,
@@ -377,9 +372,7 @@ namespace woomem
         bool drop_page = false;
         assert(!page->m_page_just_allocated.load(std::memory_order::memory_order_relaxed));
 
-        m_alive_memory_size_counter = 0;
-
-        if (page->m_page_count_if_huge != 0)
+        if (page->m_page_count_if_huge == 0)
         {
             PageUnitAlloc* const page_alloc_head =
                 reinterpret_cast<PageUnitAlloc*>(page + 1);
@@ -404,9 +397,11 @@ namespace woomem
                     has_survivor = true;
                     m_alive_memory_size_counter += unit_size_with_head;
                 }
+                else
+                    drop_freed_unit_into_page(page, unit);
             }
             if (!has_survivor)
-                drop_page = true;
+                ; // drop_page = true;
             else
             {
                 m_alive_memory_size_counter += 
@@ -421,8 +416,7 @@ namespace woomem
             else
             {
                 m_alive_memory_size_counter +=
-                    page->m_page_count_if_huge * PageHead::NORMAL_PAGE_SIZE
-                    - (sizeof(PageHead) + sizeof(UnitHead));
+                    page->m_page_count_if_huge * PageHead::NORMAL_PAGE_SIZE;
             }
         }
 
@@ -503,9 +497,13 @@ namespace woomem
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::SWEEP);
             {
-                for (PageHead* page = m_sweep_page_list; page != nullptr; page = page->m_next_page)
+                m_alive_memory_size_counter = 0;
+
+                for (PageHead* page = m_sweep_page_list; page != nullptr;)
                 {
+                    PageHead* const next_page = page->m_next_page;
                     sweep_units_in_page(page);
+                    page = next_page;
                 }
             }
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
