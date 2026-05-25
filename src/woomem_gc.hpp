@@ -66,6 +66,7 @@ namespace woomem
     private:
         const size_t            m_gc_worker_count;
         std::atomic_size_t      m_gc_assigned_thread_idx;
+        std::atomic<bool>       m_shutdown;
         woomem_GCCallback       m_gc_callback_at_begin;
         woomem_GCCallback       m_gc_callback_at_stop_marking;
         woomem_GCCallback       m_gc_callback_at_end;

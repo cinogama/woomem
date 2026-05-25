@@ -31,6 +31,7 @@ namespace woomem
         woomem_FreeCallback user_free_callback)
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
         , m_gc_assigned_thread_idx{}
+        , m_shutdown{false}
         , m_gc_callback_at_begin(callback_for_marking_root)
         , m_gc_callback_at_stop_marking(callback_stop_marking)
         , m_gc_callback_at_end(callback_mark_end)
@@ -58,7 +59,7 @@ namespace woomem
     }
     GC::~GC()
     {
-        // TODO: Stop main & worker threads here.
+        m_shutdown.store(true, std::memory_order_release);
         m_gc_main_thread.join();
 
         do
@@ -138,7 +139,10 @@ namespace woomem
                 const auto cycle_start = chrono::steady_clock::now();
                 while (true)
                 {
-                    this_thread::sleep_for(1s);
+                    this_thread::sleep_for(0.1s);
+
+                    if (m_shutdown.load(std::memory_order_acquire))
+                        return;
 
                     const auto elapsed = chrono::steady_clock::now() - cycle_start;
                     if (elapsed >= 10s)
