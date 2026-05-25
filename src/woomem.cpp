@@ -5,6 +5,7 @@
 #include "woomem_thread_context.hpp"
 
 #include "woomem_page_unit_alloc.hpp"
+#include "woomem_gc.hpp"
 
 #include <cassert>
 #include <cstring>
@@ -66,28 +67,7 @@ void* woomem_reallocate(void* ptr, size_t size)
     UnitHead* const unit_head =
         reinterpret_cast<UnitHead*>(ptr) - 1;
 
-    size_t existed_unit_available_space;
-    if (unit_head->m_next_free_unit_offset != 0)
-    {
-        PageUnitAlloc* const unit_alloc_page =
-            reinterpret_cast<PageUnitAlloc*>(
-                reinterpret_cast<char*>(unit_head)
-                - unit_head->m_next_free_unit_offset);
-
-        existed_unit_available_space =
-            unit_alloc_page->m_unit_size_in_page;
-    }
-    else
-    {
-        // Is huge unit.
-        PageHead* const huge_page =
-            reinterpret_cast<PageHead*>(reinterpret_cast<UnitHead*>(ptr) - 1) - 1;
-
-        assert(huge_page->m_page_count_if_huge != 0);
-        existed_unit_available_space =
-            huge_page->m_page_count_if_huge * PageHead::NORMAL_PAGE_SIZE
-            - (sizeof(PageHead) + sizeof(UnitHead));
-    }
+    const size_t existed_unit_available_space = unit_head->get_unit_available_size();
 
     if (size <= existed_unit_available_space)
         // TODO: Need a suitable shrink strategy to reallocate 
@@ -159,22 +139,15 @@ void woomem_mark_unit_head(void* ptr_head_may_null)
 {
     if (ptr_head_may_null != nullptr)
     {
-        t_thread_context.m_gc_marking_context;
+        t_thread_context.m_gc_marking_context->mark_unit_to_gray(
+            reinterpret_cast<UnitHead*>(ptr_head_may_null) - 1);
     }
 }
 void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null)
 {
-    void* unit = woomem_validate_addr(ptr_may_invalid_or_null);
-    if (unit != nullptr)
-    {
-
-    }
+    woomem_mark_unit_head(woomem_validate_addr(ptr_may_invalid_or_null));
 }
 void woomem_mark_fuzzy_unit_head(void* ptr_may_invalid_or_null)
 {
-    void* unit = woomem_validate_addr_head(ptr_may_invalid_or_null);
-    if (unit != nullptr)
-    {
-
-    }
+    woomem_mark_unit_head(woomem_validate_addr_head(ptr_may_invalid_or_null));
 }

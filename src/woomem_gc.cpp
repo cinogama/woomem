@@ -163,7 +163,7 @@ namespace woomem
         m_gc_worker_thread.join();
     }
     void GCWorker::mark_unit_to_gray(
-        UnitHead* unit_head, bool mark_in_worker_thread)
+        UnitHead* unit_head)
     {
         uint8_t expected = UnitLife::UNMARKED;
         if (unit_head->m_life.compare_exchange_strong(
@@ -172,11 +172,8 @@ namespace woomem
             std::memory_order::memory_order_release,
             std::memory_order::memory_order_relaxed))
         {
-            if (mark_in_worker_thread)
-            {
-                assert(std::this_thread::get_id() == m_gc_worker_thread.get_id());
+            if (std::this_thread::get_id() == m_gc_worker_thread.get_id())
                 m_local_work.push_back(unit_head);
-            }
             else
                 m_gray_queue.enqueue(unit_head);
         }
@@ -220,9 +217,14 @@ namespace woomem
             }
             if (unit->m_attribute & WOOMEM_ATTRIB_AUTO_MARK)
             {
+                const size_t unit_size = unit->get_unit_available_size();
                 
+                void** const p = reinterpret_cast<void**>(unit + 1);
+                for (size_t i = 0; i < unit_size; ++i)
+                    woomem_mark_fuzzy_unit(p[i]);
             }
 
+            // Ok mark finished.
             unit->m_life.store(
                 UnitLife::FULL_MARKED,
                 std::memory_order::memory_order_release);
@@ -244,6 +246,7 @@ namespace woomem
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::SWEEP);
             {
+
             }
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
 

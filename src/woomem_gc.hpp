@@ -35,8 +35,7 @@ namespace woomem
         GCWorker& operator=(GCWorker&&) = delete;
 
     public:
-        void mark_unit_to_gray(
-            UnitHead* unit_head, bool mark_in_worker_thread);
+        void mark_unit_to_gray(UnitHead* unit_head);
 
     private:
         void process_gray_units();

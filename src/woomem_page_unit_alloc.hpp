@@ -111,7 +111,27 @@ namespace woomem
         uint8_t             m_attribute;
         std::atomic_uint8_t m_life;
 
-        size_t get_unit_available_size() const;
+        size_t get_unit_available_size() const
+        {
+            if (m_next_free_unit_offset != 0)
+            {
+                const PageUnitAlloc* const unit_alloc_page =
+                    reinterpret_cast<const PageUnitAlloc*>(
+                        reinterpret_cast<const char*>(this)
+                        - m_next_free_unit_offset);
+
+                return unit_alloc_page->m_unit_size_in_page;
+            }
+            else
+            {
+                const PageHead* const huge_page =
+                    reinterpret_cast<const PageHead*>(this) - 1;
+
+                assert(huge_page->m_page_count_if_huge != 0);
+                return huge_page->m_page_count_if_huge * PageHead::NORMAL_PAGE_SIZE
+                    - (sizeof(PageHead) + sizeof(UnitHead));
+            }
+        }
     };
     static_assert(sizeof(UnitHead) == 8);
 
@@ -134,7 +154,7 @@ namespace woomem
 
                 page_alloc_head->m_next_allocate_unit_offset =
                     allocating_unit->m_next_free_unit_offset;
-                allocating_unit->m_next_free_unit_offset = 
+                allocating_unit->m_next_free_unit_offset =
                     current_offset;
 
                 assert(UnitLife::RELEASED == allocating_unit->m_life.load(
