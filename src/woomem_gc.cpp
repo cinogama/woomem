@@ -389,7 +389,7 @@ namespace woomem
             const size_t unit_count =
                 (PageHead::NORMAL_PAGE_SIZE - sizeof(PageHead) - sizeof(PageUnitAlloc)) / unit_size_with_head;
 
-            bool has_survivor = false;
+            bool has_survivor = false, has_free_space = false;
             for (size_t i = 0; i < unit_count; ++i)
             {
                 UnitHead* unit =
@@ -404,7 +404,18 @@ namespace woomem
                     has_survivor = true;
                     m_alive_memory_size_counter += unit_size_with_head;
                 }
+                else
+                    has_free_space = true;
             }
+
+            if (page_alloc_head->m_run_out && has_free_space)
+            {
+                page_alloc_head->m_run_out = false;
+
+                g_global_context.gpc().return_page(
+                    page, eval_group_by_small_unit_size(page_alloc_head->m_unit_size_in_page));
+            }
+
             if (!has_survivor)
                 ; // drop_page = true;
             else

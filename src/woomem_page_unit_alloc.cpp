@@ -12,7 +12,7 @@ namespace woomem
         PageUnitAlloc* const page_alloc_head =
             reinterpret_cast<PageUnitAlloc*>(page + 1);
 
-        page_alloc_head->m_run_out.store(0, std::memory_order::memory_order_relaxed);
+        page_alloc_head->m_run_out = false;
         page_alloc_head->m_freed_unit_offset.store(0, std::memory_order::memory_order_relaxed);
         page_alloc_head->m_next_allocate_unit_offset = sizeof(PageUnitAlloc);
         page_alloc_head->m_unit_size_in_page =

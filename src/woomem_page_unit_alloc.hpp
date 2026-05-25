@@ -88,7 +88,7 @@ namespace woomem
     {
         uint16_t                m_next_allocate_unit_offset;
         std::atomic_uint16_t    m_freed_unit_offset;
-        std::atomic_uint8_t     m_run_out;
+        bool                    m_run_out;
         char                    __reserved__[1];
         uint16_t                m_unit_size_in_page;
     };
@@ -136,6 +136,25 @@ namespace woomem
     static_assert(sizeof(UnitHead) == 8);
 
     void init_page_for_unit_allocating(PageHead* page, UnitAllocGroup group_type);
+    inline UnitAllocGroup eval_group_by_small_unit_size(size_t unit_size)
+    {
+        if (unit_size <= MAX_SMALL_UNIT_SIZE)
+            return SMALL_UNIT_GROUP_FAST_LOOKUP_TABLE[
+                WOOMEM_FAST_LOOKUP_GROUP_INDEX(unit_size)];
+        else
+        {
+            if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_2720])
+                return UnitAllocGroup::MIDIUM_2720;
+            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_5448])
+                return UnitAllocGroup::MIDIUM_5448;
+            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_8176])
+                return UnitAllocGroup::MIDIUM_8176;
+            else if (unit_size < GROUP_SIZE_LOOKUP_TABLE[UnitAllocGroup::MIDIUM_10904])
+                return UnitAllocGroup::MIDIUM_10904;
+            else
+                return UnitAllocGroup::MIDIUM_16360;
+        }
+    }
     inline UnitHead* pick_unit_from_page_without_init(PageHead* page)
     {
         constexpr uint16_t UNIT_PAGE_HEAD_SIZE =
@@ -169,10 +188,7 @@ namespace woomem
 
             if (current_offset == 0)
             {
-                page_alloc_head->m_run_out.store(
-                    1,
-                    std::memory_order::memory_order_relaxed);
-
+                page_alloc_head->m_run_out = true;
                 return nullptr;
             }
 

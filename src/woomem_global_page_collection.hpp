@@ -83,7 +83,6 @@ namespace woomem
             }
             return page;
         }
-
         void return_page(PageHead* page, UnitAllocGroup group)
         {
             m_free_pages[group].return_free_page(page);
