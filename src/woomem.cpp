@@ -179,7 +179,24 @@ void woomem_mark_fuzzy_unit(void* ptr_may_invalid_or_null)
 {
     woomem_mark_unit_head(woomem_validate_addr(ptr_may_invalid_or_null));
 }
-void woomem_mark_fuzzy_unit_head(void* ptr_may_invalid_or_null)
+void woomem_mark_fuzzy_unit_head(void* ptr_head_may_invalid_null)
 {
-    woomem_mark_unit_head(woomem_validate_addr_head(ptr_may_invalid_or_null));
+    woomem_mark_unit_head(woomem_validate_addr_head(ptr_head_may_invalid_null));
+}
+
+void woomem_mark_root_unit_head(void* ptr_head_may_null)
+{
+    if (ptr_head_may_null != nullptr)
+    {
+        g_gc_ctx->mark_root_unit_to_gray(
+            reinterpret_cast<UnitHead*>(ptr_head_may_null) - 1);
+    }
+}
+void woomem_mark_root_fuzzy_unit(void* ptr_may_invalid_or_null)
+{
+    woomem_mark_root_unit_head(woomem_validate_addr(ptr_may_invalid_or_null));
+}
+void woomem_mark_root_fuzzy_unit_head(void* ptr_head_may_invalid_null)
+{
+    woomem_mark_root_unit_head(woomem_validate_addr_head(ptr_head_may_invalid_null));
 }

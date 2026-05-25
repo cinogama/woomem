@@ -7,6 +7,8 @@
 #include "woomem_global_context.hpp"
 #include "woomem_thread_context.hpp"
 #include "woomem_page_unit_alloc.hpp"
+#include "woomem_lock.hpp"
+#include "woomem_rwlock.hpp"
 
 uint8_t woomem_gc_marking_round_counter = 0;
 bool woomem_gc_marking_state_flag = false;
@@ -136,6 +138,25 @@ namespace woomem
     void GC::callback_user_free(void* unit)
     {
         m_user_free_callback(unit);
+    }
+    void GC::mark_root_unit_to_gray(UnitHead* unit_head)
+    {
+        uint8_t expected = UnitLife::UNMARKED;
+        if (unit_head->m_life.compare_exchange_strong(
+            expected,
+            UnitLife::SELF_MARKED,
+            std::memory_order::memory_order_release,
+            std::memory_order::memory_order_relaxed))
+        {
+            const size_t assigned_worker_id =
+                m_gc_assigned_thread_idx.fetch_add(
+                    1, std::memory_order::memory_order_relaxed);
+
+            auto& worker = m_gc_worker_threads[assigned_worker_id % m_gc_worker_count];
+
+            std::lock_guard g(worker.m_local_work_spin_for_root);
+            worker.m_local_work.push_back(unit_head);
+        }        
     }
     GCWorker* GC::fetch_thread_worker()
     {

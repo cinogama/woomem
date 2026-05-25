@@ -2,6 +2,7 @@
 
 #include "woomem.h"
 #include "woomem_mpsc_queue.hpp"
+#include "woomem_lock.hpp"
 
 #include <atomic>
 #include <vector>
@@ -24,6 +25,7 @@ namespace woomem
         static constexpr size_t GRAY_QUEUE_CAPACITY = 8192;
         MpscGrayQueue<GRAY_QUEUE_CAPACITY> m_gray_queue;
 
+        Spinlock m_local_work_spin_for_root;
         std::vector<UnitHead*> m_local_work;
         std::array<UnitHead*, GRAY_QUEUE_CAPACITY> m_drain_buf;
 
@@ -115,6 +117,7 @@ namespace woomem
         void callback_user_free(void* unit);
 
     public:
+        void mark_root_unit_to_gray(UnitHead* unit_head);
         GCWorker* fetch_thread_worker();
         void trigger_gc(bool async);
 
