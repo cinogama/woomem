@@ -28,6 +28,7 @@ namespace woomem
         std::array<UnitHead*, GRAY_QUEUE_CAPACITY> m_drain_buf;
 
         PageHead* m_sweep_page_list;
+        size_t m_alive_memory_size_counter;
 
         std::thread m_gc_worker_thread;
     public:

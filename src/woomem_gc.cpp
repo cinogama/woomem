@@ -10,6 +10,7 @@
 
 uint8_t woomem_gc_marking_round_counter = 0;
 bool woomem_gc_marking_state_flag = false;
+size_t woomem_gc_memory_size_after_last_round_sweep = 0;
 
 namespace woomem
 {
@@ -189,6 +190,15 @@ namespace woomem
             }
             launch_worker_and_wait_until_done(WorkerThresholdState::SWEEP);
 
+            // Step 8: 统计存活内存单元大小
+            size_t total_alive_memory_size = 0;
+            for (size_t i = 0; i < m_gc_worker_count; ++i)
+            {
+                total_alive_memory_size += 
+                    m_gc_worker_threads[i].m_alive_memory_size_counter;
+            }
+            woomem_gc_memory_size_after_last_round_sweep = total_alive_memory_size;
+
             m_gc_worker_threshold_launch_state = WorkerThresholdState::PENDING;
         } while (1);
     }
@@ -259,6 +269,8 @@ namespace woomem
         bool drop_page = false;
         assert(!page->m_page_just_allocated.load(std::memory_order::memory_order_relaxed));
 
+        m_alive_memory_size_counter = 0;
+
         if (page->m_page_count_if_huge != 0)
         {
             PageUnitAlloc* const page_alloc_head =
@@ -267,7 +279,7 @@ namespace woomem
             const size_t unit_size_with_head =
                 page_alloc_head->m_unit_size_in_page + sizeof(UnitHead);
 
-            char* unit_storage = 
+            char* unit_storage =
                 reinterpret_cast<char*>(page_alloc_head + 1);
 
             const size_t unit_count =
@@ -280,15 +292,30 @@ namespace woomem
                     reinterpret_cast<UnitHead*>(unit_storage + i * unit_size_with_head);
 
                 if (check_and_free_unmarked_unit(unit))
+                {
                     has_survivor = true;
+                    m_alive_memory_size_counter += unit_size_with_head;
+                }
             }
-            drop_page = !has_survivor;
+            if (!has_survivor)
+                drop_page = true;
+            else
+            {
+                m_alive_memory_size_counter += 
+                    sizeof(PageHead) + sizeof(PageUnitAlloc);
+            }
         }
         else
         {
             // Is huge unit.
             if (!check_and_free_unmarked_unit(reinterpret_cast<UnitHead*>(page + 1)))
                 drop_page = true;
+            else
+            {
+                m_alive_memory_size_counter +=
+                    page->m_page_count_if_huge * PageHead::NORMAL_PAGE_SIZE
+                    - (sizeof(PageHead) + sizeof(UnitHead));
+            }
         }
 
         if (drop_page)

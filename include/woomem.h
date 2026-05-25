@@ -12,6 +12,7 @@ extern "C" {
 
 extern uint8_t  woomem_gc_marking_round_counter;
 extern bool     woomem_gc_marking_state_flag;
+extern size_t   woomem_gc_memory_size_after_last_round_sweep;
 
 typedef enum woomem_Attrib
 {
