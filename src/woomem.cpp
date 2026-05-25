@@ -17,7 +17,6 @@ bool woomem_init(
     size_t reserved_chunk_size,
     woomem_GCCallback gc_callback_at_begin,
     woomem_GCCallback gc_callback_at_stop_marking,
-    woomem_GCCallback gc_callback_at_mark_end,
     woomem_MarkCallback mark_callback,
     woomem_FreeCallback free_callback)
 {
@@ -31,7 +30,6 @@ bool woomem_init(
                 0, 
                 gc_callback_at_begin, 
                 gc_callback_at_stop_marking, 
-                gc_callback_at_mark_end, 
                 mark_callback, 
                 free_callback);
             return true;

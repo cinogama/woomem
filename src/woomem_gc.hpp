@@ -69,7 +69,6 @@ namespace woomem
         std::atomic<bool>       m_shutdown;
         woomem_GCCallback       m_gc_callback_at_begin;
         woomem_GCCallback       m_gc_callback_at_stop_marking;
-        woomem_GCCallback       m_gc_callback_at_end;
         woomem_MarkCallback     m_user_mark_callback;
         woomem_FreeCallback     m_user_free_callback;
 
@@ -98,7 +97,6 @@ namespace woomem
         GC(size_t worker_count, 
             woomem_GCCallback callback_for_marking_root,
             woomem_GCCallback callback_stop_marking,
-            woomem_GCCallback callback_mark_end,
             woomem_MarkCallback user_mark_callback,
             woomem_FreeCallback user_free_callback);
         ~GC();

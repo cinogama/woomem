@@ -26,7 +26,6 @@ namespace woomem
         size_t worker_count,
         woomem_GCCallback callback_for_marking_root,
         woomem_GCCallback callback_stop_marking,
-        woomem_GCCallback callback_mark_end,
         woomem_MarkCallback user_mark_callback,
         woomem_FreeCallback user_free_callback)
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
@@ -34,7 +33,6 @@ namespace woomem
         , m_shutdown{false}
         , m_gc_callback_at_begin(callback_for_marking_root)
         , m_gc_callback_at_stop_marking(callback_stop_marking)
-        , m_gc_callback_at_end(callback_mark_end)
         , m_user_mark_callback(user_mark_callback)
         , m_user_free_callback(user_free_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
@@ -220,6 +218,11 @@ namespace woomem
             ++woomem_gc_marking_round_counter;
             woomem_gc_marking_state_flag = true;
 
+            for (size_t i = 0; i < m_gc_worker_count; ++i)
+            {
+                m_gc_worker_threads[i].m_alive_memory_size_counter = 0;
+            }
+
             // Step 2: 触发 GC 起始回调，此阶段完成线程同步和根对象标记
             m_gc_callback_at_begin();
 
@@ -232,10 +235,7 @@ namespace woomem
             // Step 5: 收尾标记
             launch_worker_and_wait_until_done(WorkerThresholdState::FINAL_MARK);
 
-            // Step 6: GC 标记正式结束，最终回调
-            m_gc_callback_at_end();
-
-            // Step 7: 从全局链表中提取所有 Page，均匀分发给每个 GCWorker
+            // Step 6: 从全局链表中提取所有 Page，均匀分发给每个 GCWorker
             {
                 PageHead* all_pages = g_global_context.m_all_page_list.exchange(
                     nullptr, std::memory_order::memory_order_acq_rel);
@@ -274,7 +274,7 @@ namespace woomem
             }
             launch_worker_and_wait_until_done(WorkerThresholdState::SWEEP);
 
-            // Step 8: 统计存活内存单元大小
+            // Step 7: 统计存活内存单元大小
             size_t total_alive_memory_size = 0;
             for (size_t i = 0; i < m_gc_worker_count; ++i)
             {
