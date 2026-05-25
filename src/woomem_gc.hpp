@@ -13,9 +13,12 @@ namespace woomem
 {
     class GC;
     struct UnitHead;
+    struct PageHead;
 
     class GCWorker
     {
+        friend class GC;
+
         GC* m_gc_ctx;
 
         static constexpr size_t GRAY_QUEUE_CAPACITY = 8192;
@@ -23,6 +26,8 @@ namespace woomem
 
         std::vector<UnitHead*> m_local_work;
         std::array<UnitHead*, GRAY_QUEUE_CAPACITY> m_drain_buf;
+
+        PageHead* m_sweep_page_list;
 
         std::thread m_gc_worker_thread;
     public:
@@ -36,6 +41,7 @@ namespace woomem
 
     public:
         void mark_unit_to_gray(UnitHead* unit_head);
+        void sweep_unit_in_page(PageHead* page);
 
     private:
         void process_gray_units();

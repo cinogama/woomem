@@ -144,7 +144,43 @@ namespace woomem
             // Step 6: GC 标记正式结束，最终回调
             m_gc_callback_at_end();
 
-            // Step 7: 遍历所有 Page，回收未标记的单元
+            // Step 7: 从全局链表中提取所有 Page，均匀分发给每个 GCWorker
+            {
+                PageHead* all_pages = g_global_context.m_all_page_list.exchange(
+                    nullptr, std::memory_order::memory_order_acq_rel);
+
+                if (all_pages != nullptr)
+                {
+                    size_t total_pages = 0;
+                    for (PageHead* p = all_pages; p != nullptr; p = p->m_next_page)
+                        ++total_pages;
+
+                    const size_t base_count = total_pages / m_gc_worker_count;
+                    const size_t remainder = total_pages % m_gc_worker_count;
+
+                    PageHead* current = all_pages;
+                    for (size_t i = 0; i < m_gc_worker_count; ++i)
+                    {
+                        const size_t n = base_count + (i < remainder ? 1 : 0);
+
+                        if (n == 0)
+                        {
+                            m_gc_worker_threads[i].m_sweep_page_list = nullptr;
+                            continue;
+                        }
+
+                        m_gc_worker_threads[i].m_sweep_page_list = current;
+
+                        PageHead* prev = nullptr;
+                        for (size_t j = 0; j < n; ++j)
+                        {
+                            prev = current;
+                            current = current->m_next_page;
+                        }
+                        prev->m_next_page = nullptr;
+                    }
+                }
+            }
             launch_worker_and_wait_until_done(WorkerThresholdState::SWEEP);
 
             m_gc_worker_threshold_launch_state = WorkerThresholdState::PENDING;
@@ -153,6 +189,7 @@ namespace woomem
 
     GCWorker::GCWorker(GC* gc_ctx)
         : m_gc_ctx(gc_ctx)
+        , m_sweep_page_list(nullptr)
     {
         m_local_work.reserve(GRAY_QUEUE_CAPACITY);
         m_gc_worker_thread = std::thread(&GCWorker::worker_thread_job, this);
