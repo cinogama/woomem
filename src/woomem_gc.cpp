@@ -260,14 +260,7 @@ namespace woomem
                 {
                     size_t total_pages = 0;
                     for (PageHead* p = all_pages; p != nullptr; p = p->m_next_page)
-                    {
                         ++total_pages;
-                        if (!g_global_context.chunk().validate(p))
-                        {
-                            fprintf(stderr, "GC Step6: invalid page %p in chain at index %zu, prev pages count\n", (void*)p, total_pages);
-                            abort();
-                        }
-                    }
 
                     const size_t base_count = total_pages / m_gc_worker_count;
                     const size_t remainder = total_pages % m_gc_worker_count;
