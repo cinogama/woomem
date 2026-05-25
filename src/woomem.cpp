@@ -9,6 +9,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
 
 using namespace woomem;
 
