@@ -39,6 +39,8 @@ namespace woomem
         , m_user_free_callback(user_free_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
         , m_gc_worker_threshold_finish_counter(0)
+        , m_force_trigger_gc{false}
+        , m_gc_cycle_count{0}
         , m_new_allocated_size_since_last_gc{0}
     {
         m_gc_worker_threads = (GCWorker*)malloc(m_gc_worker_count * sizeof(GCWorker));
@@ -145,6 +147,27 @@ namespace woomem
 
         return &m_gc_worker_threads[assigned_worker_id % m_gc_worker_count];
     }
+    void GC::trigger_gc(bool async)
+    {
+        if (async)
+        {
+            m_force_trigger_gc.store(true, std::memory_order_release);
+            m_trigger_cv.notify_one();
+        }
+        else
+        {
+            const size_t prev_count = m_gc_cycle_count.load(std::memory_order_acquire);
+            m_force_trigger_gc.store(true, std::memory_order_release);
+            m_trigger_cv.notify_one();
+
+            std::unique_lock ug(m_trigger_mx);
+            m_trigger_cv.wait(ug, [this, prev_count]()
+            {
+                return m_gc_cycle_count.load(std::memory_order_acquire) > prev_count
+                    || m_shutdown.load(std::memory_order_acquire);
+            });
+        }
+    }
     void GC::main_thread_job()
     {
         using namespace std;
@@ -159,13 +182,23 @@ namespace woomem
                 const auto cycle_start = chrono::steady_clock::now();
                 while (true)
                 {
-                    this_thread::sleep_for(0.1s);
+                    {
+                        std::unique_lock ug(m_trigger_mx);
+                        m_trigger_cv.wait_for(ug, 0.1s, [this]()
+                        {
+                            return m_force_trigger_gc.load(std::memory_order_relaxed)
+                                || m_shutdown.load(std::memory_order_acquire);
+                        });
+                    }
 
                     if (m_shutdown.load(std::memory_order_acquire))
                         return;
 
                     const auto elapsed = chrono::steady_clock::now() - cycle_start;
                     if (elapsed >= 10s)
+                        break;
+
+                    if (m_force_trigger_gc.load(std::memory_order_relaxed))
                         break;
 
                     const size_t alive =
@@ -180,6 +213,7 @@ namespace woomem
                         break;
                 }
             }
+            m_force_trigger_gc.store(false, std::memory_order_relaxed);
             m_new_allocated_size_since_last_gc.store(0, std::memory_order_relaxed);
 
             // Step 1: 更新 GC 轮次和 GC 状态
@@ -250,6 +284,9 @@ namespace woomem
             woomem_gc_memory_size_after_last_round_sweep = total_alive_memory_size;
 
             m_gc_worker_threshold_launch_state = WorkerThresholdState::PENDING;
+
+            m_gc_cycle_count.fetch_add(1, std::memory_order_release);
+            m_trigger_cv.notify_all();
         } while (1);
     }
 

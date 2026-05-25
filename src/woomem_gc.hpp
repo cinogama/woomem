@@ -81,6 +81,11 @@ namespace woomem
         GCWorker*               m_gc_worker_threads;
         std::thread             m_gc_main_thread;
 
+        std::atomic<bool>       m_force_trigger_gc;
+        std::mutex              m_trigger_mx;
+        std::condition_variable m_trigger_cv;
+        std::atomic<size_t>     m_gc_cycle_count;
+
     public:
         std::atomic<size_t>     m_new_allocated_size_since_last_gc;
 
@@ -113,6 +118,7 @@ namespace woomem
 
     public:
         GCWorker* fetch_thread_worker();
+        void trigger_gc(bool async);
 
     public:
         void main_thread_job();

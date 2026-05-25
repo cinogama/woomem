@@ -51,7 +51,11 @@ void woomem_shutdown(void)
 
 // ======================================================================
 
-void woomem_trigger_gc(bool async);
+void woomem_trigger_gc(bool async)
+{
+    assert(g_gc_ctx != nullptr);
+    g_gc_ctx->trigger_gc(async);
+}
 
 void* woomem_allocate_begin(size_t size)
 {
