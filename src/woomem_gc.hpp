@@ -6,6 +6,7 @@
 #include <atomic>
 #include <vector>
 #include <thread>
+#include <array>
 #include <condition_variable>
 
 namespace woomem
@@ -21,7 +22,7 @@ namespace woomem
         MpscGrayQueue<GRAY_QUEUE_CAPACITY> m_gray_queue;
 
         std::vector<UnitHead*> m_local_work;
-        std::vector<UnitHead*> m_drain_buf;
+        std::array<UnitHead*, GRAY_QUEUE_CAPACITY> m_drain_buf;
 
         std::thread m_gc_worker_thread;
     public:
@@ -34,7 +35,8 @@ namespace woomem
         GCWorker& operator=(GCWorker&&) = delete;
 
     public:
-        void mark_unit_to_gray(UnitHead* unit_head);
+        void mark_unit_to_gray(
+            UnitHead* unit_head, bool mark_in_worker_thread);
 
     private:
         void process_gray_units();
@@ -60,6 +62,8 @@ namespace woomem
         woomem_GCCallback       m_gc_callback_at_begin;
         woomem_GCCallback       m_gc_callback_at_stop_marking;
         woomem_GCCallback       m_gc_callback_at_end;
+        woomem_MarkCallback     m_user_mark_callback;
+        woomem_FreeCallback     m_user_free_callback;
 
         WorkerThresholdState    m_gc_worker_threshold_launch_state;
         size_t                  m_gc_worker_threshold_finish_counter;
@@ -87,6 +91,9 @@ namespace woomem
         void wait_for_worker_launch(
             WorkerThresholdState expected_state);
         void worker_done_and_notify_main_gc_thread();
+
+        void callback_user_mark(void* unit);
+        void callback_user_free(void* unit);
 
     public:
         GCWorker* fetch_thread_worker();

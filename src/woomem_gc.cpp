@@ -100,6 +100,14 @@ namespace woomem
         if (++m_gc_worker_threshold_finish_counter == m_gc_worker_count)
             m_gc_worker_threshold_cv.notify_all();
     }
+    void GC::callback_user_mark(void* unit)
+    {
+        m_user_mark_callback(unit);
+    }
+    void GC::callback_user_free(void* unit)
+    {
+        m_user_free_callback(unit);
+    }
     GCWorker* GC::fetch_thread_worker()
     {
         const size_t assigned_worker_id =
@@ -147,8 +155,6 @@ namespace woomem
         : m_gc_ctx(gc_ctx)
     {
         m_local_work.reserve(GRAY_QUEUE_CAPACITY);
-        m_drain_buf.resize(GRAY_QUEUE_CAPACITY);
-
         m_gc_worker_thread = std::thread(&GCWorker::worker_thread_job, this);
     }
     GCWorker::~GCWorker()
@@ -156,7 +162,8 @@ namespace woomem
         // TODO: Stop worker thread here.
         m_gc_worker_thread.join();
     }
-    void GCWorker::mark_unit_to_gray(UnitHead* unit_head)
+    void GCWorker::mark_unit_to_gray(
+        UnitHead* unit_head, bool mark_in_worker_thread)
     {
         uint8_t expected = UnitLife::UNMARKED;
         if (unit_head->m_life.compare_exchange_strong(
@@ -165,8 +172,11 @@ namespace woomem
             std::memory_order::memory_order_release,
             std::memory_order::memory_order_relaxed))
         {
-            if (std::this_thread::get_id() == m_gc_worker_thread.get_id())
+            if (mark_in_worker_thread)
+            {
+                assert(std::this_thread::get_id() == m_gc_worker_thread.get_id());
                 m_local_work.push_back(unit_head);
+            }
             else
                 m_gray_queue.enqueue(unit_head);
         }
@@ -175,14 +185,23 @@ namespace woomem
     {
         const size_t count = m_gray_queue.drain(
             m_drain_buf.data(), m_drain_buf.size());
-        for (size_t i = 0; i < count; ++i)
-            m_local_work.push_back(m_drain_buf[i]);
+
+        if (count != 0)
+        {
+            m_local_work.insert(
+                m_local_work.end(),
+                m_drain_buf.begin(),
+                m_drain_buf.begin() + count);
+        }
     }
     void GCWorker::process_gray_units()
     {
         while (true)
         {
             if (m_local_work.empty())
+                // NOTE: `drain_queue_into_local` contains a acquire order.
+                //      So, we can sure the `m_life` of the unit to full mark
+                //      is `SELF_MARKED` we can read.
                 drain_queue_into_local();
             if (m_local_work.empty())
                 return;
@@ -190,10 +209,19 @@ namespace woomem
             UnitHead* const unit = m_local_work.back();
             m_local_work.pop_back();
 
-            // TODO: scan children via user callback here,
-            //       which may call mark_unit_to_gray for each child.
-            //       Children discovered from the worker thread will
-            //       accumulate in m_local_work automatically.
+            assert(SELF_MARKED == unit->m_life.load(
+                std::memory_order::memory_order_relaxed));
+
+            void* const unit_in_mark = unit + 1;
+
+            if (unit->m_attribute & WOOMEM_ATTRIB_MARK_CALLBACK)
+            {
+                m_gc_ctx->callback_user_mark(unit_in_mark);
+            }
+            if (unit->m_attribute & WOOMEM_ATTRIB_AUTO_MARK)
+            {
+                
+            }
 
             unit->m_life.store(
                 UnitLife::FULL_MARKED,

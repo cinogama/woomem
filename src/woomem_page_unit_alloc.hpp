@@ -110,6 +110,8 @@ namespace woomem
         uint8_t             m_timing;
         uint8_t             m_attribute;
         std::atomic_uint8_t m_life;
+
+        size_t get_unit_available_size() const;
     };
     static_assert(sizeof(UnitHead) == 8);
 
@@ -128,11 +130,12 @@ namespace woomem
             if (current_offset != 0)
             {
                 UnitHead* const allocating_unit = reinterpret_cast<UnitHead*>(
-                    reinterpret_cast<char*>(page) + current_offset);
+                    reinterpret_cast<char*>(page_alloc_head) + current_offset);
 
                 page_alloc_head->m_next_allocate_unit_offset =
                     allocating_unit->m_next_free_unit_offset;
-                allocating_unit->m_next_free_unit_offset = current_offset;
+                allocating_unit->m_next_free_unit_offset = 
+                    current_offset;
 
                 assert(UnitLife::RELEASED == allocating_unit->m_life.load(
                     std::memory_order::memory_order_relaxed));
@@ -159,9 +162,11 @@ namespace woomem
     }
     inline void drop_freed_unit_into_page(PageHead* page, UnitHead* unit)
     {
+        PageUnitAlloc* const page_alloc_head =
+            reinterpret_cast<PageUnitAlloc*>(page + 1);
+
         const auto unit_offset = static_cast<uint16_t>(
-            reinterpret_cast<char*>(unit) - reinterpret_cast<char*>(page));
-        PageUnitAlloc* const page_alloc_head = reinterpret_cast<PageUnitAlloc*>(page + 1);
+            reinterpret_cast<char*>(unit) - reinterpret_cast<char*>(page_alloc_head));
 
         assert(UnitLife::RELEASED == unit->m_life.load(
             std::memory_order::memory_order_relaxed));
