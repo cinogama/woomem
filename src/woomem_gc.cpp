@@ -264,9 +264,19 @@ namespace woomem
             char* unit_storage = 
                 reinterpret_cast<char*>(page_alloc_head + 1);
 
-            for ()
+            const size_t unit_count =
+                (PageHead::NORMAL_PAGE_SIZE - sizeof(PageHead) - sizeof(PageUnitAlloc)) / unit_size_with_head;
+
+            bool has_survivor = false;
+            for (size_t i = 0; i < unit_count; ++i)
             {
+                UnitHead* unit =
+                    reinterpret_cast<UnitHead*>(unit_storage + i * unit_size_with_head);
+
+                if (check_and_free_unmarked_unit(unit))
+                    has_survivor = true;
             }
+            drop_page = !has_survivor;
         }
         else
         {
