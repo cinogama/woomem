@@ -215,6 +215,73 @@ namespace woomem
                 m_gray_queue.enqueue(unit_head);
         }
     }
+    bool GCWorker::check_and_free_unmarked_unit(UnitHead* unit)
+    {
+        const uint8_t life = unit->m_life.load(std::memory_order::memory_order_relaxed);
+
+        assert(life != UnitLife::SELF_MARKED);
+
+        if (life == UnitLife::RELEASED)
+            return false;
+
+        if (life == UnitLife::UNMARKED
+            && (unit->m_age != 15 || unit->m_timing != woomem_gc_marking_round_counter)
+            && 0 == (unit->m_attribute & WOOMEM_ATTRIB_NEED_SWEEP))
+        {
+            // Drop it.
+            if (unit->m_attribute & WOOMEM_ATTRIB_FREE_CALLBACK)
+                m_gc_ctx->callback_user_free(unit);
+
+            unit->m_life.store(
+                UnitLife::RELEASED,
+                std::memory_order::memory_order_relaxed);
+
+            return false;
+        }
+
+        if (unit->m_age != 0)
+            --unit->m_age;
+
+        unit->m_life.store(
+            UnitLife::UNMARKED,
+            std::memory_order::memory_order_relaxed);
+
+        return true;
+    }
+    void GCWorker::sweep_units_in_page(PageHead* page)
+    {
+        bool drop_page = false;
+        assert(!page->m_page_just_allocated.load(std::memory_order::memory_order_relaxed));
+
+        if (page->m_page_count_if_huge != 0)
+        {
+            PageUnitAlloc* const page_alloc_head =
+                reinterpret_cast<PageUnitAlloc*>(page + 1);
+
+            const size_t unit_size_with_head =
+                page_alloc_head->m_unit_size_in_page + sizeof(UnitHead);
+
+            char* unit_storage = 
+                reinterpret_cast<char*>(page_alloc_head + 1);
+
+            for ()
+            {
+            }
+        }
+        else
+        {
+            // Is huge unit.
+            if (!check_and_free_unmarked_unit(reinterpret_cast<UnitHead*>(page + 1)))
+                drop_page = true;
+        }
+
+        if (drop_page)
+            // Drop this page.
+            g_global_context.chunk().free_page(page);
+        else
+            // Re-join the page into list.
+            g_global_context.add_page_back_to_into_chain(page);
+    }
     void GCWorker::drain_queue_into_local()
     {
         const size_t count = m_gray_queue.drain(
@@ -255,7 +322,7 @@ namespace woomem
             if (unit->m_attribute & WOOMEM_ATTRIB_AUTO_MARK)
             {
                 const size_t unit_size = unit->get_unit_available_size();
-                
+
                 void** const p = reinterpret_cast<void**>(unit + 1);
                 for (size_t i = 0; i < unit_size; ++i)
                     woomem_mark_fuzzy_unit(p[i]);
@@ -283,7 +350,10 @@ namespace woomem
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::SWEEP);
             {
-
+                for (PageHead* page = m_sweep_page_list; page != nullptr; page = page->m_next_page)
+                {
+                    sweep_units_in_page(page);
+                }
             }
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
 

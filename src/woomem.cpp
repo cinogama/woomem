@@ -49,7 +49,7 @@ void* woomem_allocate_begin(size_t size)
         UnitLife::RELEASED,
         std::memory_order::memory_order_relaxed);
 
-    g_global_context.add_page_into_chain(huge_unit_page);
+    g_global_context.add_new_page_into_chain(huge_unit_page);
     return huge_unit_head + 1;
 }
 void woomem_allocate_end(void* p, int attrib)

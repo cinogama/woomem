@@ -47,6 +47,6 @@ namespace woomem
 
         // NOTE: No need for fence. new allocated page will be used for current thread.
         //      If drop back to global list, there will be a release/acquire order.
-        g_global_context.add_page_into_chain(page);
+        g_global_context.add_new_page_into_chain(page);
     }
 }

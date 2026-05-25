@@ -32,7 +32,8 @@ namespace woomem
         bool init(size_t reserved_chunk_size);
         void shutdown();
 
-        void add_page_into_chain(PageHead* page);
+        void add_new_page_into_chain(PageHead* page);
+        void add_page_back_to_into_chain(PageHead* page);
         PageHead* allocate_huge_page(size_t size);
 
         Chunk& chunk() { return reinterpret_cast<Chunk&>(m_chunk_storage); }

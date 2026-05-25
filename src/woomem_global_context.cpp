@@ -64,7 +64,7 @@ namespace woomem
         m_globalcontext_inited = false;
     }
 
-    void GlobalContext::add_page_into_chain(PageHead* page)
+    void GlobalContext::add_new_page_into_chain(PageHead* page)
     {
         assert(page->m_page_just_allocated.load(
             std::memory_order::memory_order_relaxed));
@@ -72,6 +72,10 @@ namespace woomem
         page->m_page_just_allocated.store(
             false, std::memory_order::memory_order_release);
 
+        add_page_back_to_into_chain(page);
+    }
+    void GlobalContext::add_page_back_to_into_chain(PageHead* page)
+    {
         page->m_next_page = m_all_page_list.load(std::memory_order_relaxed);
 
         while (!m_all_page_list.compare_exchange_weak(
