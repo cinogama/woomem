@@ -332,7 +332,19 @@ namespace woomem
             if (std::this_thread::get_id() == m_gc_worker_thread.get_id())
                 m_local_work.push_back(unit_head);
             else
-                m_gray_queue.enqueue(unit_head);
+            {
+
+                while (!m_gray_queue.try_enqueue(unit_head))
+                {
+                    if (!woomem_gc_marking_state_flag)
+                    {
+                        unit_head->m_life.store(
+                            UnitLife::UNMARKED, 
+                            std::memory_order::memory_order_release);
+                        break;
+                    }
+                }
+            }
         }
     }
     bool GCWorker::check_and_free_unmarked_unit(UnitHead* unit, PageHead* page_may_null)
@@ -497,14 +509,19 @@ namespace woomem
     }
     void GCWorker::worker_thread_job()
     {
+        // Update `m_gc_marking_context` as this.
+        t_thread_context.m_gc_marking_context = this;
+
         do
         {
-            if (!m_gc_ctx->wait_for_worker_launch_or_shutdown(GC::WorkerThresholdState::PARALLEL_MARK))
-                return;
-            else
+            if (!m_gc_ctx->wait_for_worker_launch_or_shutdown(
+                GC::WorkerThresholdState::PARALLEL_MARK))
             {
-                process_gray_units();
+                return;
             }
+            else
+                process_gray_units();
+
             m_gc_ctx->worker_done_and_notify_main_gc_thread();
             m_gc_ctx->wait_for_worker_launch(GC::WorkerThresholdState::FINAL_MARK);
             {

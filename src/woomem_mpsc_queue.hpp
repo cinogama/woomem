@@ -36,6 +36,26 @@ namespace woomem
         MpscGrayQueue(MpscGrayQueue&&) = delete;
         MpscGrayQueue& operator=(MpscGrayQueue&&) = delete;
 
+        bool try_enqueue(UnitHead* item)
+        {
+            size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
+            for (;;)
+            {
+                Slot& slot = m_slots[pos & MASK];
+                if (slot.sequence.load(std::memory_order_acquire) < pos)
+                    return false;
+
+                if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1,
+                    std::memory_order_relaxed, std::memory_order_relaxed))
+                {
+                    slot.item = item;
+                    slot.sequence.store(pos + 1, std::memory_order_release);
+                    return true;
+                }
+            }
+        }
+
+#if 0
         void enqueue(UnitHead* item)
         {
             const size_t pos = m_enqueue_pos.fetch_add(1, std::memory_order_relaxed);
@@ -47,6 +67,7 @@ namespace woomem
             slot.item = item;
             slot.sequence.store(pos + 1, std::memory_order_release);
         }
+#endif
 
         UnitHead* dequeue()
         {
