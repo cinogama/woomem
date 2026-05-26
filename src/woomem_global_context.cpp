@@ -15,6 +15,10 @@ namespace woomem
 
     GlobalContext::~GlobalContext()
     {
+        if (m_globalcontext_inited)
+            // Only for terminate.
+            shutdown();
+
         assert(!m_globalcontext_inited);
         m_globalcontext_alive = false;
     }
