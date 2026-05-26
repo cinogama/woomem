@@ -339,7 +339,7 @@ namespace woomem
                     if (!woomem_gc_marking_state_flag)
                     {
                         unit_head->m_life.store(
-                            UnitLife::UNMARKED, 
+                            UnitLife::UNMARKED,
                             std::memory_order::memory_order_release);
                         break;
                     }
@@ -421,20 +421,33 @@ namespace woomem
                     has_free_space = true;
             }
 
-            if (page_alloc_head->m_run_out && has_free_space)
-            {
-                page_alloc_head->m_run_out = false;
+            const bool current_running_out =
+                page_alloc_head->m_run_out.load(std::memory_order_acquire);
 
-                g_global_context.gpc().return_page(
-                    page, eval_group_by_small_unit_size(page_alloc_head->m_unit_size_in_page));
+            if (current_running_out && has_free_space)
+            {
+                if (!has_survivor)
+                    drop_page = true;
+                else
+                {
+                    page_alloc_head->m_run_out.store(
+                        0, std::memory_order::memory_order_relaxed);
+
+                    g_global_context.gpc().return_page(
+                        page, eval_group_by_small_unit_size(
+                            page_alloc_head->m_unit_size_in_page));
+                }
             }
 
-            if (!has_survivor)
-                ; // drop_page = true;
-            else
+            if (has_survivor)
             {
                 m_alive_memory_size_counter +=
                     sizeof(PageHead) + sizeof(PageUnitAlloc);
+            }
+            else
+            {
+                if (!current_running_out)
+                    page_alloc_head->m_mark_as_run_out_in_global_pool = true;
             }
         }
         else

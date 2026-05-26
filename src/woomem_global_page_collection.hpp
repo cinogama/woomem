@@ -33,10 +33,24 @@ namespace woomem
                     ;
 
                 PageHead* page = nullptr;
-                if (!m_pages.empty())
+                while (!m_pages.empty())
                 {
                     page = m_pages.back();
                     m_pages.pop_back();
+
+                    PageUnitAlloc* const page_alloc_head = 
+                        reinterpret_cast<PageUnitAlloc*>(page + 1);
+
+                    if (page_alloc_head->m_mark_as_run_out_in_global_pool)
+                    {
+                        page_alloc_head->m_mark_as_run_out_in_global_pool = false;
+                        page_alloc_head->m_run_out.store(
+                            1, std::memory_order::memory_order_release);
+
+                        page = nullptr;
+                        continue;
+                    }
+                    break;
                 }
 
                 m_spin.clear(std::memory_order_release);

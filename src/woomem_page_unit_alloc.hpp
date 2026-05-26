@@ -88,8 +88,8 @@ namespace woomem
     {
         uint16_t                m_next_allocate_unit_offset;
         std::atomic_uint16_t    m_freed_unit_offset;
-        bool                    m_run_out;
-        char                    __reserved__[1];
+        std::atomic_uint8_t     m_run_out;
+        bool                    m_mark_as_run_out_in_global_pool;
         uint16_t                m_unit_size_in_page;
     };
     static_assert(sizeof(PageUnitAlloc) == 8);
@@ -188,7 +188,9 @@ namespace woomem
 
             if (current_offset == 0)
             {
-                page_alloc_head->m_run_out = true;
+                page_alloc_head->m_run_out.store(
+                    1, std::memory_order::memory_order_release);
+
                 return nullptr;
             }
 
