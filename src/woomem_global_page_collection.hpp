@@ -38,6 +38,9 @@ namespace woomem
                     page = m_pages.back();
                     m_pages.pop_back();
 
+                    if (page == nullptr)
+                        continue;
+
                     PageUnitAlloc* const page_alloc_head = 
                         reinterpret_cast<PageUnitAlloc*>(page + 1);
 
@@ -104,6 +107,38 @@ namespace woomem
         void return_page(PageHead* page, UnitAllocGroup group)
         {
             m_free_pages[group].return_free_page(page);
+        }
+
+        void remove_marked_run_out_pages()
+        {
+            for (size_t group = 0; group < UnitAllocGroup::MAX_GROUP; ++group)
+            {
+                FreePageList& free_list = m_free_pages[group];
+
+                while (free_list.m_spin.test_and_set(std::memory_order_acquire))
+                    ;
+
+                auto& pages = free_list.m_pages;
+                for (auto& page : pages)
+                {
+                    if (page != nullptr)
+                    {
+                        PageUnitAlloc* alloc_head =
+                            reinterpret_cast<PageUnitAlloc*>(page + 1);
+
+                        if (alloc_head->m_mark_as_run_out_in_global_pool)
+                        {
+                            alloc_head->m_mark_as_run_out_in_global_pool = false;
+                            alloc_head->m_run_out.store(
+                                1, std::memory_order::memory_order_release);
+
+                            page = nullptr;
+                        }
+                    }
+                }
+
+                free_list.m_spin.clear(std::memory_order_release);
+            }
         }
     };
 }

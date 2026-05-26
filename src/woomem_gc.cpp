@@ -300,6 +300,8 @@ namespace woomem
             }
             woomem_gc_memory_size_after_last_round_sweep = total_alive_memory_size;
 
+            g_global_context.gpc().remove_marked_run_out_pages();
+
             m_gc_worker_threshold_launch_state = WorkerThresholdState::PENDING;
 
             m_gc_cycle_count.fetch_add(1, std::memory_order_release);
