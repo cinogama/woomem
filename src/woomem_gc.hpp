@@ -27,6 +27,7 @@ namespace woomem
 
         Spinlock m_local_work_spin_for_root;
         std::vector<UnitHead*> m_local_work;
+        std::atomic<bool> m_is_draining{false};
         std::array<UnitHead*, GRAY_QUEUE_CAPACITY> m_drain_buf;
 
         PageHead* m_sweep_page_list;

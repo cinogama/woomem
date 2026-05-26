@@ -40,9 +40,9 @@ bool woomem_init(
 }
 void woomem_shutdown(void)
 {
-    g_global_context.shutdown();
-
     g_gc_ctx->~GC();
+
+    g_global_context.shutdown();
     free(g_gc_ctx);
 
     g_gc_ctx = nullptr;

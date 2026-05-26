@@ -335,7 +335,6 @@ namespace woomem
                 m_local_work.push_back(unit_head);
             else
             {
-
                 while (!m_gray_queue.try_enqueue(unit_head))
                 {
                     if (!woomem_gc_marking_state_flag)
@@ -344,6 +343,31 @@ namespace woomem
                             UnitLife::UNMARKED,
                             std::memory_order::memory_order_release);
                         break;
+                    }
+
+                    /*
+                        如果 Worker 尚未启动（m_is_draining == false），而此时灰度队
+                        列已满，那么继续自旋等待队列空闲将会导致死锁：
+                        
+                        1. GC 主线程在 Step 2 等待 VM 响应 GC_CHECK
+                        2. VM 线程在此处自旋（队列满，无人消费）
+                        3. Worker 线程等待 PARALLEL_MARK 信号（Step 3 尚未到达）
+
+                        解决办法：直接推入 m_local_work（通过 m_local_work_spin_for_root）。
+
+                        注意与 Worker 的同步：Worker 在进入 process_gray_units 时，会
+                        持有同一把自旋锁将 m_is_draining 置为 true。此处持锁后二次
+                        检查 m_is_draining：若发现 Worker 已开始消费，则放弃直接推送，
+                        继续尝试 enqueue（此时 Worker 正在 drain，队列很快会有空位）。
+                    */
+                    if (!m_is_draining.load(std::memory_order_acquire))
+                    {
+                        std::lock_guard g(m_local_work_spin_for_root);
+                        if (!m_is_draining.load(std::memory_order_relaxed))
+                        {
+                            m_local_work.push_back(unit_head);
+                            break;
+                        }
                     }
                 }
             }
@@ -486,6 +510,18 @@ namespace woomem
     }
     void GCWorker::process_gray_units()
     {
+        /*
+            与 mark_unit_to_gray 中的外部线程建立同步：
+            外部线程在持锁后二次检查 m_is_draining，若为 false 则推入 
+            m_local_work。此处持同一把锁将 m_is_draining 置为 true，
+            保证 Worker 开始消费 m_local_work 之前，外部线程的推送已
+            经完成。
+        */
+        {
+            std::lock_guard g(m_local_work_spin_for_root);
+            m_is_draining.store(true, std::memory_order_release);
+        }
+
         while (true)
         {
             if (m_local_work.empty())
@@ -494,7 +530,10 @@ namespace woomem
                 //      is `SELF_MARKED` we can read.
                 drain_queue_into_local();
             if (m_local_work.empty())
+            {
+                m_is_draining.store(false, std::memory_order_release);
                 return;
+            }
 
             UnitHead* const unit = m_local_work.back();
             m_local_work.pop_back();
