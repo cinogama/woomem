@@ -33,6 +33,7 @@ namespace woomem
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
         , m_gc_assigned_thread_idx{}
         , m_shutdown{ false }
+        , m_worker_shutdown{ false }
         , m_gc_callback_at_begin(callback_for_marking_root)
         , m_gc_callback_at_stop_marking(callback_stop_marking)
         , m_user_mark_callback(user_mark_callback)
@@ -61,7 +62,7 @@ namespace woomem
     }
     GC::~GC()
     {
-        m_shutdown.store(true, std::memory_order_release);
+        m_shutdown.store(true, std::memory_order::memory_order_release);
         m_gc_main_thread.join();
 
         do
@@ -71,6 +72,7 @@ namespace woomem
                 thread_entry = nullptr;
         } while (0);
 
+        m_worker_shutdown.store(true, std::memory_order::memory_order_release);
         for (size_t i = 0; i < m_gc_worker_count; ++i)
             m_gc_worker_threads[i].~GCWorker();
 
@@ -113,9 +115,9 @@ namespace woomem
             [this, expected_state]()
             {
                 return expected_state == m_gc_worker_threshold_launch_state
-                    || m_shutdown.load(std::memory_order_acquire);
+                    || m_worker_shutdown.load(std::memory_order_acquire);
             });
-        return !m_shutdown.load(std::memory_order_acquire);
+        return !m_worker_shutdown.load(std::memory_order_acquire);
     }
     void GC::signal_worker_shutdown()
     {
