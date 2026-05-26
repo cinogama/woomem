@@ -31,36 +31,31 @@ namespace woomem
         size_t get_total_page_count() const;
 
     private:
-        static constexpr uint32_t INDEX_NULL = UINT32_MAX;
-
-        static constexpr uint8_t STATE_FREE        = 0x00;
-        static constexpr uint8_t STATE_ALLOCATED   = 0x01;
-        static constexpr uint8_t STATE_ORDER_SHIFT = 1;
-        static constexpr uint8_t STATE_CONTINUATION = 0xFF;
-
-        static size_t round_up_power_of_2(size_t v);
-        static size_t ilog2(size_t v);
+        static constexpr uint32_t INDEX_NULL       = UINT32_MAX;
+        static constexpr uint32_t ALLOCATED_FLAG   = 0x80000000u;
+        static constexpr uint32_t COUNT_MASK       = 0x7FFFFFFFu;
 
         size_t page_to_index(PageHead* page) const;
         PageHead* index_to_page(size_t idx) const;
         size_t addr_to_index(void* ptr) const;
 
-        PageHead* allocate_block(size_t order);
         PageHead* commit_page(size_t idx);
 
-        void push_free(size_t order, uint32_t idx);
-        uint32_t pop_free(size_t order);
-        void remove_free(size_t order, uint32_t idx);
+        PageHead* allocate_pages(uint32_t required_pages);
+
+        void free_list_insert(uint32_t idx, uint32_t count);
+        void free_list_remove(uint32_t idx);
+
+        uint32_t free_list_find_block(uint32_t required) const;
 
         void*       base_;
         size_t      reserved_size_;
         size_t      total_pages_;
-        size_t      max_order_;
 
-        uint8_t*    state_;
-        uint32_t*   prev_;
-        uint32_t*   next_;
-        uint32_t*   free_heads_;
+        uint32_t*   count_;
+        uint32_t*   free_prev_;
+        uint32_t*   free_next_;
+        uint32_t    free_head_;
         uint8_t*    commit_;
 
         ReadWriteSpinlock rwlock_;

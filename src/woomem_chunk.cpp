@@ -8,26 +8,6 @@
 
 namespace woomem
 {
-    size_t Chunk::round_up_power_of_2(size_t v)
-    {
-        if (v <= 1) return 1;
-        --v;
-        v |= v >> 1;
-        v |= v >> 2;
-        v |= v >> 4;
-        v |= v >> 8;
-        v |= v >> 16;
-        if (sizeof(size_t) > 4) v |= v >> 32;
-        return v + 1;
-    }
-
-    size_t Chunk::ilog2(size_t v)
-    {
-        size_t r = 0;
-        while (v >>= 1) ++r;
-        return r;
-    }
-
     size_t Chunk::page_to_index(PageHead* page) const
     {
         return static_cast<size_t>(
@@ -55,62 +35,48 @@ namespace woomem
         : base_(nullptr)
         , reserved_size_(0)
         , total_pages_(0)
-        , max_order_(0)
-        , state_(nullptr)
-        , prev_(nullptr)
-        , next_(nullptr)
-        , free_heads_(nullptr)
+        , count_(nullptr)
+        , free_prev_(nullptr)
+        , free_next_(nullptr)
+        , free_head_(INDEX_NULL)
         , commit_(nullptr)
     {
-        size_t num_pages =
+        if (reserved_size == 0)
+            return;
+
+        total_pages_ =
             (reserved_size + PageHead::NORMAL_PAGE_SIZE - 1) /
             PageHead::NORMAL_PAGE_SIZE;
-        total_pages_ = round_up_power_of_2(num_pages);
-        max_order_ = ilog2(total_pages_);
         reserved_size_ = total_pages_ * PageHead::NORMAL_PAGE_SIZE;
 
         base_ = woomem_os_reserve_memory(reserved_size_);
         if (!base_)
         {
             total_pages_ = 0;
-            max_order_ = 0;
             reserved_size_ = 0;
             return;
         }
 
-        state_ = new uint8_t[total_pages_];
-        prev_  = new uint32_t[total_pages_];
-        next_  = new uint32_t[total_pages_];
-        free_heads_ = new uint32_t[max_order_ + 1];
-        commit_ = new uint8_t[total_pages_];
-
-        memset(state_, 0, total_pages_);
-        memset(commit_, 0, total_pages_);
+        count_      = new uint32_t[total_pages_]();
+        free_prev_  = new uint32_t[total_pages_];
+        free_next_  = new uint32_t[total_pages_];
+        commit_     = new uint8_t[total_pages_]();
 
         for (size_t i = 0; i < total_pages_; ++i)
         {
-            prev_[i] = INDEX_NULL;
-            next_[i] = INDEX_NULL;
+            free_prev_[i] = INDEX_NULL;
+            free_next_[i] = INDEX_NULL;
         }
 
-        for (size_t i = 0; i <= max_order_; ++i)
-        {
-            free_heads_[i] = INDEX_NULL;
-        }
-
-        state_[0] = static_cast<uint8_t>(max_order_ << STATE_ORDER_SHIFT);
-
-        free_heads_[max_order_] = 0;
-        prev_[0] = INDEX_NULL;
-        next_[0] = INDEX_NULL;
+        count_[0] = static_cast<uint32_t>(total_pages_);
+        free_head_ = 0;
     }
 
     Chunk::~Chunk()
     {
-        delete[] state_;
-        delete[] prev_;
-        delete[] next_;
-        delete[] free_heads_;
+        delete[] count_;
+        delete[] free_prev_;
+        delete[] free_next_;
         delete[] commit_;
         if (base_)
         {
@@ -120,7 +86,7 @@ namespace woomem
 
     bool Chunk::is_init_failed() const
     {
-        return base_ == nullptr;
+        return base_ == nullptr && total_pages_ == 0;
     }
 
     PageHead* Chunk::commit_page(size_t idx)
@@ -134,103 +100,123 @@ namespace woomem
         return p;
     }
 
-    void Chunk::push_free(size_t order, uint32_t idx)
+    void Chunk::free_list_remove(uint32_t idx)
     {
-        uint32_t head = free_heads_[order];
-        free_heads_[order] = idx;
-        prev_[idx] = INDEX_NULL;
-        next_[idx] = head;
-        if (head != INDEX_NULL)
-        {
-            prev_[head] = idx;
-        }
-    }
+        uint32_t prev = free_prev_[idx];
+        uint32_t next = free_next_[idx];
 
-    uint32_t Chunk::pop_free(size_t order)
-    {
-        uint32_t head = free_heads_[order];
-        if (head == INDEX_NULL)
-            return INDEX_NULL;
-
-        uint32_t succ = next_[head];
-        free_heads_[order] = succ;
-        if (succ != INDEX_NULL)
-        {
-            prev_[succ] = INDEX_NULL;
-        }
-        prev_[head] = INDEX_NULL;
-        next_[head] = INDEX_NULL;
-        return head;
-    }
-
-    void Chunk::remove_free(size_t order, uint32_t idx)
-    {
-        uint32_t p = prev_[idx];
-        uint32_t n = next_[idx];
-
-        if (p == INDEX_NULL)
-        {
-            free_heads_[order] = n;
-        }
+        if (prev != INDEX_NULL)
+            free_next_[prev] = next;
         else
-        {
-            next_[p] = n;
-        }
+            free_head_ = next;
 
-        if (n != INDEX_NULL)
-        {
-            prev_[n] = p;
-        }
+        if (next != INDEX_NULL)
+            free_prev_[next] = prev;
 
-        prev_[idx] = INDEX_NULL;
-        next_[idx] = INDEX_NULL;
+        free_prev_[idx] = INDEX_NULL;
+        free_next_[idx] = INDEX_NULL;
     }
 
-    PageHead* Chunk::allocate_block(size_t order)
+    void Chunk::free_list_insert(uint32_t idx, uint32_t count)
     {
-        assert(base_ != nullptr);
+    restart:
+        uint32_t prev = INDEX_NULL;
+        uint32_t next = free_head_;
+        while (next != INDEX_NULL && next < idx)
+        {
+            prev = next;
+            next = free_next_[next];
+        }
 
+        if (prev != INDEX_NULL)
+        {
+            uint32_t prev_count = count_[prev];
+            if (prev + prev_count == idx)
+            {
+                free_list_remove(prev);
+                count = prev_count + count;
+                idx = prev;
+                goto restart;
+            }
+        }
+
+        if (next != INDEX_NULL)
+        {
+            uint32_t next_count = count_[next];
+            if (idx + count == next)
+            {
+                free_list_remove(next);
+                count = count + next_count;
+                goto restart;
+            }
+        }
+
+        free_prev_[idx] = prev;
+        free_next_[idx] = next;
+
+        if (prev != INDEX_NULL)
+            free_next_[prev] = idx;
+        else
+            free_head_ = idx;
+
+        if (next != INDEX_NULL)
+            free_prev_[next] = idx;
+
+        count_[idx] = count;
+    }
+
+    uint32_t Chunk::free_list_find_block(uint32_t required) const
+    {
+        uint32_t curr = free_head_;
+        while (curr != INDEX_NULL)
+        {
+            if ((count_[curr] & COUNT_MASK) >= required)
+                return curr;
+            curr = free_next_[curr];
+        }
+        return INDEX_NULL;
+    }
+
+    PageHead* Chunk::allocate_pages(uint32_t required_pages)
+    {
         ReadWriteSpinlock::WriteGuard guard(rwlock_);
 
-        for (size_t k = order; k <= max_order_; ++k)
+        uint32_t idx = free_list_find_block(required_pages);
+        if (idx == INDEX_NULL)
+            return nullptr;
+
+        uint32_t block_count = count_[idx] & COUNT_MASK;
+
+        free_list_remove(idx);
+
+        if (block_count > required_pages)
         {
-            if (free_heads_[k] == INDEX_NULL)
-                continue;
+            uint32_t left_idx = idx + required_pages;
+            uint32_t left_count = block_count - required_pages;
 
-            uint32_t idx = pop_free(k);
+            count_[left_idx] = left_count;
+            for (uint32_t j = 1; j < left_count; ++j)
+                count_[left_idx + j] = 0;
 
-            while (k > order)
-            {
-                --k;
-                size_t buddy = idx + (size_t(1) << k);
-                state_[buddy] = static_cast<uint8_t>(k << STATE_ORDER_SHIFT);
-                push_free(k, static_cast<uint32_t>(buddy));
-            }
-
-            const size_t block_pages = size_t(1) << order;
-
-            PageHead* const page = commit_page(idx);
-            page->m_page_just_allocated.store(
-                true, std::memory_order_relaxed);
-
-            state_[idx] = static_cast<uint8_t>(
-                (order << STATE_ORDER_SHIFT) | STATE_ALLOCATED);
-
-            for (size_t j = 1; j < block_pages; ++j)
-            {
-                (void)commit_page(idx + j);
-                state_[idx + j] = STATE_CONTINUATION;
-            }
-
-            return page;
+            free_list_insert(left_idx, left_count);
         }
 
-        return nullptr;
+        count_[idx] = required_pages | ALLOCATED_FLAG;
+        for (uint32_t j = 1; j < required_pages; ++j)
+            count_[idx + j] = 0;
+
+        for (uint32_t j = 0; j < required_pages; ++j)
+            (void)commit_page(idx + j);
+
+        PageHead* const page = index_to_page(idx);
+        page->m_page_just_allocated.store(
+            true, std::memory_order_relaxed);
+        return page;
     }
 
     PageHead* Chunk::allocate_page()
     {
-        PageHead* page = allocate_block(0);
+        PageHead* page = allocate_pages(1);
         if (page != nullptr)
             page->m_page_count_if_huge = 0;
         return page;
@@ -243,9 +229,11 @@ namespace woomem
         const size_t required_pages =
             (size + PageHead::NORMAL_PAGE_SIZE - 1) /
             PageHead::NORMAL_PAGE_SIZE;
-        const size_t order = ilog2(round_up_power_of_2(required_pages));
 
-        PageHead* page = allocate_block(order);
+        if (required_pages > total_pages_)
+            return nullptr;
+
+        PageHead* page = allocate_pages(static_cast<uint32_t>(required_pages));
         if (page != nullptr)
             page->m_page_count_if_huge = required_pages;
         return page;
@@ -255,49 +243,24 @@ namespace woomem
     {
         assert(base_ != nullptr
             && page != nullptr
-            && validate(page) != nullptr);
+            && validate(page) == page);
 
         ReadWriteSpinlock::WriteGuard guard(rwlock_);
 
         size_t idx = page_to_index(page);
-        uint8_t s = state_[idx];
+        uint32_t c = count_[idx];
 
-        if (!(s & STATE_ALLOCATED)) return;
+        if (!(c & ALLOCATED_FLAG))
+            return;
 
-        size_t order = s >> STATE_ORDER_SHIFT;
-        size_t block_pages = size_t(1) << order;
+        uint32_t block_count = c & COUNT_MASK;
 
-        state_[idx] = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
+        for (uint32_t j = 0; j < block_count; ++j)
+            count_[idx + j] = 0;
 
-        for (size_t j = 1; j < block_pages; ++j)
-        {
-            state_[idx + j] = 0;
-        }
+        count_[idx] = block_count;
 
-        while (order < max_order_)
-        {
-            size_t block_size = size_t(1) << order;
-            size_t buddy = idx ^ block_size;
-
-            if (buddy >= total_pages_)
-                break;
-
-            uint8_t bs = state_[buddy];
-            if ((bs & STATE_ALLOCATED) != 0)
-                break;
-            if ((bs >> STATE_ORDER_SHIFT) != order)
-                break;
-
-            remove_free(order, static_cast<uint32_t>(buddy));
-
-            state_[buddy] = 0;
-
-            idx = idx < buddy ? idx : buddy;
-            ++order;
-        }
-
-        state_[idx] = static_cast<uint8_t>(order << STATE_ORDER_SHIFT);
-        push_free(order, static_cast<uint32_t>(idx));
+        free_list_insert(static_cast<uint32_t>(idx), block_count);
     }
 
     PageHead* Chunk::validate(void* ptr)
@@ -314,20 +277,24 @@ namespace woomem
 
         ReadWriteSpinlock::ReadGuard guard(rwlock_);
 
-        for (size_t order = 0; order <= max_order_; ++order)
+        size_t head_idx = idx;
+        while (count_[head_idx] == 0)
         {
-            size_t block_size = size_t(1) << order;
-            size_t candidate = idx & ~(block_size - 1);
-            uint8_t s = state_[candidate];
-
-            if ((s & STATE_ALLOCATED) &&
-                (static_cast<size_t>(s >> STATE_ORDER_SHIFT) == order))
-            {
-                return index_to_page(candidate);
-            }
+            if (head_idx == 0)
+                return nullptr;
+            --head_idx;
         }
 
-        return nullptr;
+        uint32_t c = count_[head_idx];
+
+        if ((c & ALLOCATED_FLAG) == 0)
+            return nullptr;
+
+        uint32_t block_count = c & COUNT_MASK;
+        if (idx >= head_idx + block_count)
+            return nullptr;
+
+        return index_to_page(head_idx);
     }
 
     size_t Chunk::get_total_size() const
