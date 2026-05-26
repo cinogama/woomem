@@ -246,6 +246,7 @@ namespace woomem
             launch_worker_and_wait_until_done(WorkerThresholdState::PARALLEL_MARK);
 
             // Step 4: 首轮标记结束回调，此阶段通知正在运行的其他线程不要继续标记
+            woomem_gc_marking_state_flag = false;
             m_gc_callback_at_stop_marking();
 
             // Step 5: 收尾标记
