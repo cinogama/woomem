@@ -9,6 +9,7 @@
 #include <thread>
 #include <array>
 #include <condition_variable>
+#include <unordered_set>
 
 namespace woomem
 {
@@ -89,6 +90,9 @@ namespace woomem
         std::condition_variable m_trigger_cv;
         std::atomic<size_t>     m_gc_cycle_count;
 
+        Spinlock                m_root_gc_unit_set_mx;
+        std::unordered_set<UnitHead*> m_root_gc_unit_set;
+
     public:
         std::atomic<size_t>     m_new_allocated_size_since_last_gc;
 
@@ -122,7 +126,8 @@ namespace woomem
         void mark_root_unit_to_gray(UnitHead* unit_head);
         GCWorker* fetch_thread_worker();
         void trigger_gc(bool async);
-
+        void register_root_unit_head(UnitHead* unit_head);
+        void unregister_root_unit_head(UnitHead* unit_head);
     public:
         void main_thread_job();
     };

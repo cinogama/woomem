@@ -189,6 +189,21 @@ namespace woomem
                 });
         }
     }
+
+    void GC::register_root_unit_head(UnitHead* unit_head)
+    {
+        m_root_gc_unit_set_mx.lock();
+        m_root_gc_unit_set.insert(unit_head);
+        m_root_gc_unit_set_mx.unlock();
+    }
+
+    void GC::unregister_root_unit_head(UnitHead* unit_head)
+    {
+        m_root_gc_unit_set_mx.lock();
+        m_root_gc_unit_set.erase(unit_head);
+        m_root_gc_unit_set_mx.unlock();
+    }
+
     void GC::main_thread_job()
     {
         using namespace std;
@@ -243,6 +258,13 @@ namespace woomem
 
             // Step 2: 触发 GC 起始回调，此阶段完成线程同步和根对象标记
             m_gc_callback_at_begin();
+
+            m_root_gc_unit_set_mx.lock();
+            {
+                for (UnitHead* const root_unit : m_root_gc_unit_set)
+                    mark_root_unit_to_gray(root_unit);
+            }
+            m_root_gc_unit_set_mx.unlock();
 
             // Step 3: 根对象标记完成，收集，开始并行标记
             launch_worker_and_wait_until_done(WorkerThresholdState::PARALLEL_MARK);

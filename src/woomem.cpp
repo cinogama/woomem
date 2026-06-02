@@ -95,6 +95,23 @@ void woomem_allocate_end(void* p, int attrib)
     unit_head->m_attribute = static_cast<uint8_t>(attrib);
     unit_head->m_life.store(UnitLife::UNMARKED, std::memory_order::memory_order_release);
 }
+void woomem_allocate_end_as_root(void* p, int attrib)
+{
+    UnitHead* const unit_head =
+        reinterpret_cast<UnitHead*>(p) - 1;
+
+    woomem::g_gc_ctx->register_root_unit_head(unit_head);
+    woomem_allocate_end(p, attrib);
+}
+
+void woomem_remove_root(void* p)
+{
+    UnitHead* const unit_head =
+        reinterpret_cast<UnitHead*>(p) - 1;
+
+    woomem::g_gc_ctx->unregister_root_unit_head(unit_head);
+}
+
 void* woomem_reallocate(void* ptr, size_t size)
 {
     assert(ptr != nullptr);
