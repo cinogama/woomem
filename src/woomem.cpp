@@ -104,7 +104,7 @@ void woomem_allocate_end_as_root(void* p, int attrib)
     woomem_allocate_end(p, attrib);
 }
 
-void woomem_remove_root(void* p)
+void woomem_remove_from_root_set(void* p)
 {
     UnitHead* const unit_head =
         reinterpret_cast<UnitHead*>(p) - 1;

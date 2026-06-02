@@ -40,7 +40,7 @@ void woomem_trigger_gc(bool async);
 void* woomem_allocate_begin(size_t size);
 void woomem_allocate_end(void* p, int attrib);
 void woomem_allocate_end_as_root(void* p, int attrib);
-void woomem_remove_root(void* p);
+void woomem_remove_from_root_set(void* p);
 
 // Donot reallocate a root, the old unit will not be released.
 void* woomem_reallocate(void* ptr, size_t size);
