@@ -77,7 +77,8 @@ void* woomem_allocate_begin(size_t size)
 
     huge_unit_head->m_next_free_unit_offset = 0;
     huge_unit_head->m_life.store(
-        UnitLife::RELEASED,
+        UnitLife::PENDING,
+        // relaxed is enough, `m_page_just_allocated` will be set as release order.
         std::memory_order::memory_order_relaxed);
 
     g_global_context.add_new_page_into_chain(huge_unit_page);
@@ -154,7 +155,7 @@ void* woomem_validate_addr(void* ptr_may_invalid)
             unit_head = reinterpret_cast<UnitHead*>(page_head + 1);
         }
 
-        if (unit_head->m_life.load(std::memory_order::memory_order_relaxed) != UnitLife::RELEASED)
+        if (unit_head->m_life.load(std::memory_order::memory_order_relaxed) > UnitLife::PENDING)
             return unit_head + 1;
     }
 

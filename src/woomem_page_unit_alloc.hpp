@@ -97,6 +97,7 @@ namespace woomem
     enum UnitLife : uint8_t
     {
         RELEASED,
+        PENDING,
         UNMARKED,
         SELF_MARKED,
         FULL_MARKED,
@@ -179,6 +180,7 @@ namespace woomem
                 assert(UnitLife::RELEASED == allocating_unit->m_life.load(
                     std::memory_order::memory_order_relaxed));
 
+                allocating_unit->m_life.store(UnitLife::PENDING, std::memory_order_relaxed);
                 return allocating_unit;
             }
 

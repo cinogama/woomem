@@ -350,7 +350,7 @@ namespace woomem
                     /*
                         如果 Worker 尚未启动（m_is_draining == false），而此时灰度队
                         列已满，那么继续自旋等待队列空闲将会导致死锁：
-                        
+
                         1. GC 主线程在 Step 2 等待 VM 响应 GC_CHECK
                         2. VM 线程在此处自旋（队列满，无人消费）
                         3. Worker 线程等待 PARALLEL_MARK 信号（Step 3 尚未到达）
@@ -378,36 +378,40 @@ namespace woomem
     bool GCWorker::check_and_free_unmarked_unit(UnitHead* unit, PageHead* page_may_null)
     {
         const uint8_t life = unit->m_life.load(std::memory_order::memory_order_relaxed);
-
-        assert(life != UnitLife::SELF_MARKED);
-
-        if (life == UnitLife::RELEASED)
-            return false;
-
-        if (life == UnitLife::UNMARKED
-            && (unit->m_age != 15 || unit->m_timing != woomem_gc_marking_round_counter)
-            && 0 != (unit->m_attribute & WOOMEM_ATTRIB_NEED_SWEEP))
+        switch (life)
         {
-            // Drop it.
-            if (unit->m_attribute & WOOMEM_ATTRIB_FREE_CALLBACK)
-                m_gc_ctx->callback_user_free(unit + 1);
+        case UnitLife::RELEASED:
+            return false;
+        case UnitLife::PENDING:
+            return true;
+        case UnitLife::UNMARKED:
+            if ((unit->m_age != 15 || unit->m_timing != woomem_gc_marking_round_counter)
+                && 0 != (unit->m_attribute & WOOMEM_ATTRIB_NEED_SWEEP))
+            {
+                // Drop it.
+                if (unit->m_attribute & WOOMEM_ATTRIB_FREE_CALLBACK)
+                    m_gc_ctx->callback_user_free(unit + 1);
+
+                unit->m_life.store(
+                    UnitLife::RELEASED,
+                    std::memory_order::memory_order_relaxed);
+
+                if (page_may_null != nullptr)
+                    drop_freed_unit_into_page(page_may_null, unit);
+
+                return false;
+            }
+            /* fallthrough */
+            [[fallthrough]];
+        default:
+            assert(life != UnitLife::SELF_MARKED);
+            if (unit->m_age != 0)
+                --unit->m_age;
 
             unit->m_life.store(
-                UnitLife::RELEASED,
+                UnitLife::UNMARKED,
                 std::memory_order::memory_order_relaxed);
-
-            if (page_may_null != nullptr)
-                drop_freed_unit_into_page(page_may_null, unit);
-
-            return false;
         }
-
-        if (unit->m_age != 0)
-            --unit->m_age;
-
-        unit->m_life.store(
-            UnitLife::UNMARKED,
-            std::memory_order::memory_order_relaxed);
 
         return true;
     }
@@ -431,6 +435,10 @@ namespace woomem
                 (PageHead::NORMAL_PAGE_SIZE - sizeof(PageHead) - sizeof(PageUnitAlloc)) / unit_size_with_head;
 
             bool has_survivor = false, has_free_space = false;
+
+            const bool current_running_out =
+                page_alloc_head->m_run_out.load(std::memory_order_acquire);
+
             for (size_t i = 0; i < unit_count; ++i)
             {
                 UnitHead* unit =
@@ -448,9 +456,6 @@ namespace woomem
                 else
                     has_free_space = true;
             }
-
-            const bool current_running_out =
-                page_alloc_head->m_run_out.load(std::memory_order_acquire);
 
             if (current_running_out && has_free_space)
             {
@@ -514,7 +519,7 @@ namespace woomem
     {
         /*
             与 mark_unit_to_gray 中的外部线程建立同步：
-            外部线程在持锁后二次检查 m_is_draining，若为 false 则推入 
+            外部线程在持锁后二次检查 m_is_draining，若为 false 则推入
             m_local_work。此处持同一把锁将 m_is_draining 置为 true，
             保证 Worker 开始消费 m_local_work 之前，外部线程的推送已
             经完成。
