@@ -364,7 +364,6 @@ namespace woomem
                 m_local_work.push_back(unit_head);
             else
             {
-                assert(woomem_gc_marking_state_flag);
                 while (!m_gray_queue.try_enqueue(unit_head))
                 {
                     /*
