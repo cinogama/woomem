@@ -11,6 +11,8 @@ namespace woomem
         ThreadPageCollection m_thread_page_collection;
         /* OPTIONAL */ GCWorker* m_gc_marking_context;
 
+        bool m_is_gc_worker_context;
+
         ThreadContext();
         ~ThreadContext();
 

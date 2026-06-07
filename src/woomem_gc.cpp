@@ -57,7 +57,10 @@ namespace woomem
         {
             std::lock_guard g(g_global_context.m_thread_entries_mx);
             for (ThreadContext* thread_entry : g_global_context.m_thread_entries)
-                thread_entry->m_gc_marking_context = fetch_thread_worker();
+            {
+                if (!thread_entry->m_is_gc_worker_context)
+                    thread_entry->m_gc_marking_context = fetch_thread_worker();
+            }
         } while (0);
     }
     GC::~GC()
@@ -150,6 +153,8 @@ namespace woomem
             std::memory_order::memory_order_release,
             std::memory_order::memory_order_relaxed))
         {
+            assert(woomem_gc_marking_state_flag);
+
             const size_t assigned_worker_id =
                 m_gc_assigned_thread_idx.fetch_add(
                     1, std::memory_order::memory_order_relaxed);
@@ -359,16 +364,9 @@ namespace woomem
                 m_local_work.push_back(unit_head);
             else
             {
+                assert(woomem_gc_marking_state_flag);
                 while (!m_gray_queue.try_enqueue(unit_head))
                 {
-                    if (!woomem_gc_marking_state_flag)
-                    {
-                        unit_head->m_life.store(
-                            UnitLife::UNMARKED,
-                            std::memory_order::memory_order_release);
-                        break;
-                    }
-
                     /*
                         如果 Worker 尚未启动（m_is_draining == false），而此时灰度队
                         列已满，那么继续自旋等待队列空闲将会导致死锁：
@@ -593,6 +591,7 @@ namespace woomem
     void GCWorker::worker_thread_job()
     {
         // Update `m_gc_marking_context` as this.
+        t_thread_context.m_is_gc_worker_context = true;
         t_thread_context.m_gc_marking_context = this;
 
         do

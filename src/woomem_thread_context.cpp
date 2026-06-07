@@ -11,6 +11,7 @@ namespace woomem
             g_global_context.m_globalcontext_inited
             ? &g_global_context.gpc()
             : nullptr)
+        , m_is_gc_worker_context(false)
     {
         if (g_gc_ctx != nullptr)
             m_gc_marking_context = g_gc_ctx->fetch_thread_worker();
