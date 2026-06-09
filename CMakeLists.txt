@@ -5,6 +5,7 @@ project ("woomem")
 add_library(woomem_options INTERFACE)
 target_compile_features(woomem_options INTERFACE cxx_std_17)
 target_compile_features(woomem_options INTERFACE c_std_11)
+target_include_directories(woomem_options INTERFACE "include")
 
 if (MSVC)
     if (POLICY CMP0141)
@@ -14,7 +15,7 @@ if (MSVC)
             "$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,"
             "$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
     endif()
-    target_compile_options(woomem_options INTERFACE "/source-charset:utf-8")
+    target_compile_options(woomem_options INTERFACE "/utf-8")
 else()
     # Linux/Unix: link pthread
     find_package(Threads REQUIRED)
