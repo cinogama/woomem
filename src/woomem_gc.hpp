@@ -76,6 +76,8 @@ namespace woomem
         woomem_GCCallback       m_gc_callback_at_stop_marking;
         woomem_MarkCallback     m_user_mark_callback;
         woomem_FreeCallback     m_user_free_callback;
+        woomem_GCMainThreadEntryCallback m_main_entry_callback;
+        woomem_GCWorkerThreadEntryCallback m_worker_entry_callback;
 
         WorkerThresholdState    m_gc_worker_threshold_launch_state;
         size_t                  m_gc_worker_threshold_finish_counter;
@@ -106,7 +108,9 @@ namespace woomem
             woomem_GCCallback callback_for_marking_root,
             woomem_GCCallback callback_stop_marking,
             woomem_MarkCallback user_mark_callback,
-            woomem_FreeCallback user_free_callback);
+            woomem_FreeCallback user_free_callback,
+            woomem_GCMainThreadEntryCallback main_entry_callback,
+            woomem_GCWorkerThreadEntryCallback worker_entry_callback);
         ~GC();
 
     public:
@@ -119,6 +123,7 @@ namespace woomem
         void signal_worker_shutdown();
         void worker_done_and_notify_main_gc_thread();
 
+        void callback_worker_entry();
         void callback_user_mark(void* unit);
         void callback_user_free(void* unit);
 

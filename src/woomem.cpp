@@ -18,7 +18,9 @@ bool woomem_init(
     woomem_GCCallback gc_callback_at_begin,
     woomem_GCCallback gc_callback_at_stop_marking,
     woomem_MarkCallback mark_callback,
-    woomem_FreeCallback free_callback)
+    woomem_FreeCallback free_callback,
+    woomem_GCMainThreadEntryCallback main_entry_callback,
+    woomem_GCWorkerThreadEntryCallback worker_entry_callback)
 {
     assert(!g_global_context.m_globalcontext_inited && g_gc_ctx == nullptr);
     if (g_global_context.init(reserved_chunk_size))
@@ -31,7 +33,9 @@ bool woomem_init(
                 gc_callback_at_begin, 
                 gc_callback_at_stop_marking, 
                 mark_callback, 
-                free_callback);
+                free_callback,
+                main_entry_callback,
+                worker_entry_callback);
             return true;
         }
         g_global_context.shutdown();

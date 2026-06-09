@@ -29,7 +29,9 @@ namespace woomem
         woomem_GCCallback callback_for_marking_root,
         woomem_GCCallback callback_stop_marking,
         woomem_MarkCallback user_mark_callback,
-        woomem_FreeCallback user_free_callback)
+        woomem_FreeCallback user_free_callback,
+        woomem_GCMainThreadEntryCallback main_entry_callback,
+        woomem_GCWorkerThreadEntryCallback worker_entry_callback)
         : m_gc_worker_count(worker_count != 0 ? worker_count : default_gc_worker_count())
         , m_gc_assigned_thread_idx{}
         , m_shutdown{ false }
@@ -38,6 +40,8 @@ namespace woomem
         , m_gc_callback_at_stop_marking(callback_stop_marking)
         , m_user_mark_callback(user_mark_callback)
         , m_user_free_callback(user_free_callback)
+        , m_main_entry_callback(main_entry_callback)
+        , m_worker_entry_callback(worker_entry_callback)
         , m_gc_worker_threshold_launch_state(WorkerThresholdState::PENDING)
         , m_gc_worker_threshold_finish_counter(0)
         , m_force_trigger_gc{ false }
@@ -136,6 +140,10 @@ namespace woomem
         if (++m_gc_worker_threshold_finish_counter == m_gc_worker_count)
             m_gc_worker_threshold_cv.notify_all();
     }
+    void GC::callback_worker_entry()
+    {
+        m_worker_entry_callback();
+    }
     void GC::callback_user_mark(void* unit)
     {
         m_user_mark_callback(unit);
@@ -211,6 +219,8 @@ namespace woomem
 
     void GC::main_thread_job()
     {
+        m_main_entry_callback();
+
         using namespace std;
         do
         {
@@ -592,6 +602,8 @@ namespace woomem
         // Update `m_gc_marking_context` as this.
         t_thread_context.m_is_gc_worker_context = true;
         t_thread_context.m_gc_marking_context = this;
+
+        m_gc_ctx->callback_worker_entry();
 
         do
         {

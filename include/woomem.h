@@ -26,13 +26,17 @@ typedef enum woomem_Attrib
 typedef void (*woomem_MarkCallback)(void*);
 typedef void (*woomem_FreeCallback)(void*);
 typedef void (*woomem_GCCallback)(void);
+typedef void (*woomem_GCMainThreadEntryCallback)(void);
+typedef void (*woomem_GCWorkerThreadEntryCallback)(void);
 
 bool woomem_init(
     size_t reserved_chunk_size,
     woomem_GCCallback gc_callback_at_begin,
     woomem_GCCallback gc_callback_at_stop_marking,
     woomem_MarkCallback mark_callback,
-    woomem_FreeCallback free_callback);
+    woomem_FreeCallback free_callback,
+    woomem_GCMainThreadEntryCallback main_entry_callback,
+    woomem_GCWorkerThreadEntryCallback worker_entry_callback);
 void woomem_shutdown(void);
 
 void woomem_trigger_gc(bool async);
