@@ -20,7 +20,7 @@ namespace woomem
             {
                 while (state & WRITE_LOCKED)
                 {
-                    state = state_.load(std::memory_order_relaxed);
+                    state = state_.load(std::memory_order_acquire);
                 }
                 uint32_t desired = (state & ~WRITE_LOCKED) + READER_ONE;
                 if (state_.compare_exchange_weak(
@@ -45,7 +45,7 @@ namespace woomem
             {
                 while (state & (WRITE_LOCKED | READERS_MASK))
                 {
-                    state = state_.load(std::memory_order_relaxed);
+                    state = state_.load(std::memory_order_acquire);
                 }
                 uint32_t desired = state | WRITE_LOCKED;
                 if (state_.compare_exchange_weak(

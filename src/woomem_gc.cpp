@@ -76,7 +76,7 @@ namespace woomem
         {
             std::lock_guard g(g_global_context.m_thread_entries_mx);
             for (ThreadContext* thread_entry : g_global_context.m_thread_entries)
-                thread_entry = nullptr;
+                thread_entry->m_gc_marking_context = nullptr;
         } while (0);
 
         m_worker_shutdown.store(true, std::memory_order::memory_order_release);
@@ -253,7 +253,7 @@ namespace woomem
                         break;
 
                     const size_t alive =
-                        std::min(GC_TRIGGER_MIN_EDGE, woomem_gc_memory_size_after_last_round_sweep);
+                        std::max(GC_TRIGGER_MIN_EDGE, woomem_gc_memory_size_after_last_round_sweep);
 
                     const size_t new_alloc =
                         m_new_allocated_size_since_last_gc.load(
