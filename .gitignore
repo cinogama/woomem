@@ -354,6 +354,10 @@ compile_commands.json
 CTestTestfile.cmake
 _deps
 
+/CMakeSettings.json
+/AGENTS.md
+
 /out/
 /build/
-/CMakeSettings.json
+/build2/
+/build_ninja/
